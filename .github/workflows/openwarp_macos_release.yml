@@ -267,7 +267,7 @@ jobs:
         working-directory: homebrew-openwarp
         run: |
           set -euo pipefail
-          brew install --cask --no-quarantine openwarp
+          brew install --cask openwarp
           brew list --cask openwarp
 
       - name: Commit and push cask update
