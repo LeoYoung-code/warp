@@ -1,0 +1,305 @@
+# OpenWarp macOS 自动发布流水线
+#
+# 只服务自动同步链路:openwarp-v* tag -> macOS arm64 DMG -> GitHub Release -> Homebrew cask。
+# 三平台手动发布继续使用 openwarp_release.yml,避免 Windows/Linux 构建失败阻塞 Homebrew。
+
+name: OpenWarp macOS Release
+
+on:
+  push:
+    tags:
+      - "openwarp-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CONFIG_FILE: ".github/workflows/release_configurations.json"
+  CHANNEL: oss
+  HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'LeoYoung-code/homebrew-openwarp' }}
+  RELEASE_ASSET_NAME: OpenWarp-arm64.dmg
+
+jobs:
+  prepare_metadata:
+    name: Prepare metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.compute_tag.outputs.tag }}
+      release_branch: ${{ steps.compute_tag.outputs.branch }}
+      release_name: ${{ steps.get-config.outputs.release_base_name }} ${{ steps.compute_tag.outputs.tag }}
+      release_body: ${{ steps.release-body.outputs.body }}
+      cask_version: ${{ steps.compute_tag.outputs.cask_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Get channel configuration
+        id: get-config
+        uses: ./.github/actions/get_channel_config/
+        with:
+          config_file: ${{ env.CONFIG_FILE }}
+          channel: ${{ env.CHANNEL }}
+
+      - name: Compute release tag and branch
+        id: compute_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            branch="$tag"
+          else
+            tag="openwarp-v$(date +%Y.%m.%d.%H%M)"
+            branch="${GITHUB_REF#refs/heads/}"
+          fi
+
+          if [[ "$tag" != openwarp-v* ]]; then
+            echo "::error::OpenWarp macOS release tags must start with openwarp-v: $tag"
+            exit 1
+          fi
+
+          cask_version="${tag#openwarp-v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "cask_version=$cask_version" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag / build ref: $branch / cask version: $cask_version"
+
+      - name: Build release body
+        id: release-body
+        shell: bash
+        env:
+          RELEASE_BODY_TEXT: ${{ steps.get-config.outputs.release_body_text }}
+          RELEASE_TAG: ${{ steps.compute_tag.outputs.tag }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'body<<EOF'
+            echo "$RELEASE_BODY_TEXT"
+            echo
+            echo "Release tag: $RELEASE_TAG"
+            echo "Source commit: $GITHUB_SHA"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+  release_macos:
+    name: Build Release (macOS arm64)
+    runs-on: macos-26
+    needs: prepare_metadata
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare_metadata.outputs.release_branch }}
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: macos
+          is_self_hosted: false
+          install_release_deps: true
+
+      - name: Ensure rust target is installed
+        run: rustup target add aarch64-apple-darwin
+        shell: bash
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: stable
+
+      - name: Install cargo-bundle
+        run: script/install_cargo_bundle
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build aarch64 bundle (unsigned)
+        id: bundle_app
+        run: |
+          script/bundle --channel "$CHANNEL" --arch aarch64 --dmg-name-suffix arm64 --nosign
+        shell: bash
+        env:
+          GIT_RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openwarp-macos-arm64
+          path: ${{ steps.bundle_app.outputs.dmg_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish_release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - prepare_metadata
+      - release_macos
+    outputs:
+      asset_url: ${{ steps.asset.outputs.url }}
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openwarp-macos-arm64
+          path: dist
+
+      - name: List downloaded files
+        run: ls -lh dist
+        shell: bash
+
+      - name: Create GitHub release with macOS asset
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          name: ${{ needs.prepare_metadata.outputs.release_name }}
+          tag_name: ${{ needs.prepare_metadata.outputs.release_tag }}
+          body: ${{ needs.prepare_metadata.outputs.release_body }}
+          draft: false
+          prerelease: false
+          make_latest: "true"
+          files: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Expose release asset URL
+        id: asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          RELEASE_ASSET_NAME: ${{ env.RELEASE_ASSET_NAME }}
+        run: |
+          set -euo pipefail
+          asset_url="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq ".assets[] | select(.name == \"$RELEASE_ASSET_NAME\") | .url")"
+          if [[ -z "$asset_url" ]]; then
+            echo "::error::Release asset not found: $RELEASE_ASSET_NAME"
+            exit 1
+          fi
+          echo "url=$asset_url" >> "$GITHUB_OUTPUT"
+          echo "Release asset URL: $asset_url"
+
+  update_homebrew:
+    name: Update Homebrew cask
+    runs-on: macos-latest
+    needs:
+      - prepare_metadata
+      - publish_release
+    steps:
+      - name: Download release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          RELEASE_ASSET_NAME: ${{ env.RELEASE_ASSET_NAME }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$RELEASE_ASSET_NAME" \
+            --dir dist
+          test -f "dist/$RELEASE_ASSET_NAME"
+
+      - name: Compute sha256
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256="$(shasum -a 256 "dist/$RELEASE_ASSET_NAME" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "DMG sha256: $sha256"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-openwarp
+
+      - name: Update cask
+        shell: bash
+        working-directory: homebrew-openwarp
+        env:
+          CASK_VERSION: ${{ needs.prepare_metadata.outputs.cask_version }}
+          CASK_SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p Casks
+          ruby - <<'RUBY'
+          version = ENV.fetch("CASK_VERSION")
+          sha256 = ENV.fetch("CASK_SHA256")
+          cask = <<~CASK
+            cask "openwarp" do
+              version "#{version}"
+              sha256 "#{sha256}"
+
+              url "https://github.com/LeoYoung-code/warp/releases/download/openwarp-v\#{version}/OpenWarp-arm64.dmg",
+                  verified: "github.com/LeoYoung-code/warp/"
+              name "OpenWarp"
+              desc "Open-source build of Warp terminal"
+              homepage "https://github.com/LeoYoung-code/warp"
+
+              app "OpenWarp.app"
+
+              zap trash: [
+                "~/Library/Application Support/dev.openwarp.OpenWarp",
+                "~/Library/Preferences/dev.openwarp.OpenWarp.plist",
+              ]
+            end
+          CASK
+          File.write("Casks/openwarp.rb", cask)
+          RUBY
+
+      - name: Audit cask
+        shell: bash
+        working-directory: homebrew-openwarp
+        run: brew audit --cask --strict Casks/openwarp.rb
+
+      - name: Install cask from local file
+        shell: bash
+        working-directory: homebrew-openwarp
+        run: |
+          set -euo pipefail
+          brew install --cask --no-quarantine ./Casks/openwarp.rb
+          brew list --cask openwarp
+
+      - name: Commit and push cask update
+        shell: bash
+        working-directory: homebrew-openwarp
+        env:
+          CASK_VERSION: ${{ needs.prepare_metadata.outputs.cask_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Casks/openwarp.rb; then
+            echo "Casks/openwarp.rb already up to date."
+            exit 0
+          fi
+
+          git add Casks/openwarp.rb
+          git commit -m "chore(release): 发布 OpenWarp $CASK_VERSION"
+          git push
+
+      - name: Summary
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          CASK_VERSION: ${{ needs.prepare_metadata.outputs.cask_version }}
+          ASSET_URL: ${{ needs.publish_release.outputs.asset_url }}
+          CASK_SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          {
+            echo "## OpenWarp macOS release"
+            echo
+            echo "- Tag: $RELEASE_TAG"
+            echo "- Version: $CASK_VERSION"
+            echo "- Asset: $ASSET_URL"
+            echo "- sha256: $CASK_SHA256"
+            echo "- Homebrew tap: $HOMEBREW_TAP_REPO"
+          } >> "$GITHUB_STEP_SUMMARY"
