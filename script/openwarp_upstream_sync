@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PUBLISH_REPO="${PUBLISH_REPO:-LeoYoung-code/warp}"
+UPSTREAM_REPO="${UPSTREAM_REPO:-zerx-lab/warp}"
+BRANCH="${BRANCH:-main}"
+PUBLISH_REMOTE="${PUBLISH_REMOTE:-publish}"
+UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
+RELEASE_WORKFLOW="${RELEASE_WORKFLOW:-openwarp_macos_release.yml}"
+MODE="dry-run"
+
+usage() {
+  cat <<'USAGE'
+Usage: script/openwarp_upstream_sync [--dry-run|--execute]
+
+Synchronize zerx-lab/warp main into LeoYoung-code/warp main and create an
+openwarp-vYYYY.MM.DD.N release tag. The default mode is --dry-run.
+
+Environment overrides:
+  PUBLISH_REPO      default: LeoYoung-code/warp
+  UPSTREAM_REPO     default: zerx-lab/warp
+  BRANCH            default: main
+  PUBLISH_REMOTE    default: publish
+  UPSTREAM_REMOTE   default: upstream
+  RELEASE_WORKFLOW  default: openwarp_macos_release.yml
+USAGE
+}
+
+while (($#)); do
+  case "$1" in
+    --dry-run)
+      MODE="dry-run"
+      shift
+      ;;
+    --execute)
+      MODE="execute"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+log() {
+  printf '[openwarp-sync] %s\n' "$*" >&2
+}
+
+run() {
+  log "+ $*"
+  if [[ "$MODE" == "execute" ]]; then
+    "$@"
+  fi
+}
+
+ensure_remote() {
+  local remote="$1"
+  local url="$2"
+
+  if git remote get-url "$remote" >/dev/null 2>&1; then
+    git remote set-url "$remote" "$url"
+  else
+    git remote add "$remote" "$url"
+  fi
+}
+
+next_tag_for_today() {
+  local prefix
+  local latest
+  local next
+
+  prefix="openwarp-v$(date +%Y.%m.%d)."
+  latest="$(git tag -l "${prefix}*" | sed "s/^${prefix}//" | sort -n | tail -1)"
+  if [[ -z "$latest" ]]; then
+    next=1
+  else
+    next=$((latest + 1))
+  fi
+
+  printf '%s%s' "$prefix" "$next"
+}
+
+create_conflict_issue() {
+  local upstream_sha="$1"
+  local publish_sha="$2"
+  local conflict_files="$3"
+
+  if [[ "$MODE" != "execute" ]]; then
+    log "dry-run: would create conflict issue in $PUBLISH_REPO"
+    return 0
+  fi
+
+  gh issue create \
+    --repo "$PUBLISH_REPO" \
+    --title "上游同步失败: $UPSTREAM_REPO@$upstream_sha" \
+    --body "本地 git merge 失败。\n\n上游: $UPSTREAM_REPO@$upstream_sha\nfork: $PUBLISH_REPO@$publish_sha\n\n冲突文件:\n\n$conflict_files"
+}
+
+running_workflow_count() {
+  local output
+
+  if output="$(gh run list \
+    --repo "$PUBLISH_REPO" \
+    --workflow "$RELEASE_WORKFLOW" \
+    --status in_progress \
+    --json databaseId \
+    --jq 'length' 2>&1)"; then
+    printf '%s' "$output"
+    return 0
+  fi
+
+  if [[ "$output" == *"workflow $RELEASE_WORKFLOW not found"* ]]; then
+    if [[ "$MODE" == "dry-run" ]]; then
+      log "dry-run: release workflow $RELEASE_WORKFLOW is not on $PUBLISH_REPO default branch yet"
+      printf '0'
+      return 0
+    fi
+
+    echo "Release workflow $RELEASE_WORKFLOW is not available on $PUBLISH_REPO default branch; abort before creating tag." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+require_command git
+require_command gh
+
+log "mode: $MODE"
+log "publish repo: $PUBLISH_REPO"
+log "upstream repo: $UPSTREAM_REPO"
+log "branch: $BRANCH"
+
+gh auth status
+gh repo view "$PUBLISH_REPO" --json nameWithOwner,defaultBranchRef,viewerPermission,url
+gh repo view "$UPSTREAM_REPO" --json nameWithOwner,defaultBranchRef,viewerPermission,url
+
+upstream_sha="$(gh api "repos/$UPSTREAM_REPO/commits/$BRANCH" --jq .sha)"
+publish_sha="$(gh api "repos/$PUBLISH_REPO/commits/$BRANCH" --jq .sha)"
+
+log "upstream $BRANCH: $upstream_sha"
+log "publish  $BRANCH: $publish_sha"
+
+running_release_count="$(running_workflow_count)"
+
+if [[ "$running_release_count" != "0" ]]; then
+  log "$RELEASE_WORKFLOW is already running; skip this round."
+  exit 0
+fi
+
+if [[ "$upstream_sha" == "$publish_sha" ]]; then
+  log "No upstream changes: publish main already equals upstream main."
+  exit 0
+fi
+
+if [[ "$MODE" == "execute" && -n "$(git status --porcelain)" ]]; then
+  echo "Worktree is dirty; abort to avoid mixing automation with local edits." >&2
+  git status --short >&2
+  exit 1
+fi
+
+ensure_remote "$PUBLISH_REMOTE" "https://github.com/$PUBLISH_REPO.git"
+ensure_remote "$UPSTREAM_REMOTE" "https://github.com/$UPSTREAM_REPO.git"
+
+git fetch "$PUBLISH_REMOTE" "$BRANCH" --tags
+git fetch "$UPSTREAM_REMOTE" "$BRANCH"
+
+if git merge-base --is-ancestor "$UPSTREAM_REMOTE/$BRANCH" "$PUBLISH_REMOTE/$BRANCH"; then
+  log "No upstream changes: publish main already contains upstream main."
+  exit 0
+fi
+
+tag="$(next_tag_for_today)"
+existing_tag_for_publish_sha="$(git tag --points-at "$publish_sha" 'openwarp-v*' | head -1 || true)"
+
+if [[ -n "$existing_tag_for_publish_sha" ]]; then
+  log "Publish commit already has release tag $existing_tag_for_publish_sha; skip."
+  exit 0
+fi
+
+merge_branch="automation/openwarp-upstream-sync-$(date +%Y%m%d-%H%M%S)"
+log "merge branch: $merge_branch"
+log "next tag: $tag"
+
+if [[ "$MODE" == "dry-run" ]]; then
+  if git merge-tree --write-tree "$PUBLISH_REMOTE/$BRANCH" "$UPSTREAM_REMOTE/$BRANCH" >/dev/null 2>&1; then
+    log "dry-run merge check: clean"
+  else
+    log "dry-run merge check: conflicts likely; rerun with --execute only if you intend to create the failure issue"
+  fi
+  log "dry-run complete; no branch, main push, tag, or issue was created."
+  exit 0
+fi
+
+git switch -C "$merge_branch" "$PUBLISH_REMOTE/$BRANCH"
+
+if ! git merge --no-edit "$UPSTREAM_REMOTE/$BRANCH"; then
+  conflict_files="$(git diff --name-only --diff-filter=U || true)"
+  git merge --abort || true
+  create_conflict_issue "$upstream_sha" "$publish_sha" "$conflict_files"
+  exit 1
+fi
+
+cargo fmt --check
+
+git push "$PUBLISH_REMOTE" "HEAD:$BRANCH"
+new_sha="$(gh api "repos/$PUBLISH_REPO/commits/$BRANCH" --jq .sha)"
+existing_tag_for_new_sha="$(git tag --points-at "$new_sha" 'openwarp-v*' | head -1 || true)"
+
+if [[ -n "$existing_tag_for_new_sha" ]]; then
+  log "Synchronized commit already has release tag $existing_tag_for_new_sha; skip tag creation."
+  exit 0
+fi
+
+git tag "$tag" "$new_sha"
+git push "$PUBLISH_REMOTE" "$tag"
+
+log "pushed main: $publish_sha -> $new_sha"
+log "pushed tag: $tag"
+gh run list --repo "$PUBLISH_REPO" --workflow "$RELEASE_WORKFLOW" --limit 5

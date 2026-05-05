@@ -1,5 +1,38 @@
 # openWarp 上游同步指南
 
+## 自动同步与 Homebrew 发布
+
+自动发布链路由两部分组成:
+
+1. 本地/Codex 侧运行 `script/openwarp_upstream_sync`,负责检查 `zerx-lab/warp:main`、合并到 `LeoYoung-code/warp:main`,并创建 `openwarp-vYYYY.MM.DD.N` tag。
+2. GitHub Actions 的 `.github/workflows/openwarp_macos_release.yml` 响应 `openwarp-v*` tag,只构建 macOS arm64 DMG,创建 GitHub Release,并更新 `LeoYoung-code/homebrew-openwarp` 的 `Casks/openwarp.rb`。
+
+先做 dry-run,确认仓库身份、权限、ahead/behind 和 tag 递增逻辑:
+
+```bash
+script/openwarp_upstream_sync --dry-run
+```
+
+确认无误后才允许执行真实同步:
+
+```bash
+script/openwarp_upstream_sync --execute
+```
+
+执行模式会拒绝脏工作树,避免把本地开发改动混入自动化 merge。合并冲突时脚本会停止、abort merge,并用 `gh issue create` 在 `LeoYoung-code/warp` 记录冲突文件和两端 SHA;不会 push `main`,也不会创建 release tag。
+
+GitHub 侧需要准备:
+
+- 仓库变量 `HOMEBREW_TAP_REPO`,默认值可省略为 `LeoYoung-code/homebrew-openwarp`。
+- 仓库 secret `HOMEBREW_TAP_TOKEN`,需要能写 tap 仓库。
+- `GITHUB_TOKEN` 需要 `contents: write`,workflow 已显式声明。
+
+Codex cron 建议每天北京时间 03:30 运行同一入口。prompt 保持短而可审计:
+
+```text
+在 /Users/staff/project/AI/warp-leo 运行 script/openwarp_upstream_sync --execute; 结束时汇报是否同步、main SHA 变化、发布 tag、GitHub workflow run URL。若 gh auth 失效或 merge 冲突,不要重试推送,按脚本输出汇报阻塞。
+```
+
 ## 当前同步状态(基线 master = e089051,本地 openWarp tip = 3c4c11b)
 
 上游 0443f3f..upstream/master 共 **138 条 commit**,处理结果:
