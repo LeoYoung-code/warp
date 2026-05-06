@@ -579,7 +579,7 @@ impl CommandSearchView {
         let muted_color: ColorU = appearance.theme().nonactive_ui_text_color().into();
         let text = appearance
             .ui_builder()
-            .span("Loading...")
+            .span(crate::t!("common-loading"))
             .with_style(UiComponentStyles {
                 font_size: Some(appearance.monospace_font_size()),
                 font_family_id: Some(appearance.ui_font_family()),
@@ -607,6 +607,13 @@ impl CommandSearchView {
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         if is_ratelimit_error {
+            if UserWorkspaces::as_ref(app).is_byo_api_key_enabled() {
+                return self.render_error_header_text(
+                    "Request limit reached. Please try again later.".to_string(),
+                    appearance,
+                );
+            }
+
             let current_user_id = self.auth_state.user_id().unwrap_or_default();
             if let Some(team) = UserWorkspaces::as_ref(app).current_team() {
                 let current_user_email = self.auth_state.user_email().unwrap_or_default();
@@ -620,7 +627,10 @@ impl CommandSearchView {
                             current_user_id,
                         )
                     } else {
-                        self.render_error_header_text("Looks like you're out of credits. Contact a team admin to upgrade for more credits.".to_string(), appearance)
+                        self.render_error_header_text(
+                            crate::t!("command-search-out-of-credits-contact-admin"),
+                            appearance,
+                        )
                     }
                 } else {
                     self.render_error_header_text(message, appearance)
@@ -685,7 +695,7 @@ impl CommandSearchView {
             appearance
                 .ui_builder()
                 .link(
-                    "Upgrade".into(),
+                    crate::t!("common-upgrade").into(),
                     None,
                     Some(Box::new(move |ctx| {
                         ctx.dispatch_typed_action(CommandSearchAction::AttemptLoginGatedUpgrade);
@@ -697,7 +707,7 @@ impl CommandSearchView {
             appearance
                 .ui_builder()
                 .link(
-                    "Upgrade".into(),
+                    crate::t!("common-upgrade").into(),
                     None,
                     Some(Box::new(move |ctx| {
                         ctx.dispatch_typed_action(CommandSearchAction::OpenUpgradeLink(
@@ -712,7 +722,7 @@ impl CommandSearchView {
         row.add_child(
             appearance
                 .ui_builder()
-                .span("Looks like you're out of credits. ")
+                .span(crate::t!("command-search-out-of-credits-prefix"))
                 .with_style(UiComponentStyles {
                     font_size: Some(appearance.monospace_font_size()),
                     font_family_id: Some(appearance.ui_font_family()),
@@ -734,7 +744,7 @@ impl CommandSearchView {
         row.add_child(
             appearance
                 .ui_builder()
-                .span(" for more credits.")
+                .span(crate::t!("command-search-for-more-credits-suffix"))
                 .with_style(UiComponentStyles {
                     font_size: Some(appearance.monospace_font_size()),
                     font_family_id: Some(appearance.ui_font_family()),
@@ -761,7 +771,7 @@ impl CommandSearchView {
                 // There are no results to display, so notify the user of that fact.
                 let text = appearance
                     .ui_builder()
-                    .span("No results found.")
+                    .span(crate::t!("common-no-results-found"))
                     .with_style(UiComponentStyles {
                         font_size: Some(appearance.monospace_font_size()),
                         font_family_id: Some(appearance.ui_font_family()),

@@ -50,6 +50,7 @@ use crate::{
         TerminalModel,
     },
     util::time_format::format_approx_duration_from_now_utc,
+    workspaces::user_workspaces::UserWorkspaces,
 };
 
 const CLOUD_AGENT_DOCS_URL: &str = "https://docs.warp.dev/agent-platform/cloud-agents/overview";
@@ -641,10 +642,13 @@ fn render_title_and_description(props: HeaderProps, app: &AppContext) -> Vec<Box
 
             // Second line: text with "Visit docs" hyperlink.
             let description_with_link = FormattedText::new([FormattedTextLine::Line(vec![
-                FormattedTextFragment::plain_text(
-                    "Use cloud agents to run parallel agents, build agents that run autonomously, and check in on your agents from anywhere. ",
+                FormattedTextFragment::plain_text(crate::t!(
+                    "agent-zero-state-cloud-agents-description"
+                )),
+                FormattedTextFragment::hyperlink(
+                    crate::t!("agent-zero-state-visit-docs"),
+                    CLOUD_AGENT_DOCS_URL,
                 ),
-                FormattedTextFragment::hyperlink("Visit docs", CLOUD_AGENT_DOCS_URL),
             ])]);
 
             items.push(
@@ -1185,6 +1189,10 @@ fn render_oz_updates(props: OzUpdatesProps<'_>, app: &AppContext) -> Option<Box<
 /// Renders the ambient credits banner showing free cloud credits.
 /// If `link_mouse_state` is provided, a "Launch cloud agent" link is shown.
 pub fn render_ambient_credits_banner(credits: i32, app: &AppContext) -> Box<dyn Element> {
+    if UserWorkspaces::as_ref(app).is_byo_api_key_enabled() {
+        return Empty::new().finish();
+    }
+
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
     let font_family = appearance.ui_font_family();

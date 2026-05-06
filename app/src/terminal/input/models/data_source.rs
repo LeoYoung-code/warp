@@ -447,7 +447,7 @@ impl SearchItem for ModelSearchItem {
                         ButtonVariant::Outlined,
                         self.manage_api_key_mouse_state.clone(),
                     )
-                    .with_text_label("Manage".to_string())
+                    .with_text_label(crate::t!("common-manage"))
                     .with_style(UiComponentStyles {
                         height: Some(24.),
                         padding: Some(Coords {
@@ -498,7 +498,7 @@ impl SearchItem for ModelSearchItem {
                     ButtonVariant::Outlined,
                     self.manage_api_key_mouse_state.clone(),
                 )
-                .with_text_label("Manage".to_string())
+                .with_text_label(crate::t!("common-manage"))
                 .with_style(UiComponentStyles {
                     height: Some(24.),
                     padding: Some(Coords {
@@ -565,23 +565,27 @@ impl SearchItem for ModelSearchItem {
                     LLMProvider::OpenAI | LLMProvider::Anthropic | LLMProvider::Google
                 );
 
-            let mut text_fragments = vec![
-                FormattedTextFragment::plain_text(format!(
-                    "{display_name} is not available for free users. "
-                )),
-                FormattedTextFragment::hyperlink("Upgrade", upgrade_url),
-            ];
-
-            if byok_available {
-                text_fragments.push(FormattedTextFragment::plain_text(" or ".to_string()));
-                text_fragments.push(FormattedTextFragment::hyperlink_action(
-                    "bring your own key",
-                    WorkspaceAction::ShowSettingsPageWithSearch {
-                        search_query: "api".to_string(),
-                        section: Some(SettingsSection::WarpAgent),
-                    },
-                ));
-            }
+            let text_fragments = if byok_available {
+                vec![
+                    FormattedTextFragment::plain_text(format!(
+                        "{display_name} can be used by adding your own key. "
+                    )),
+                    FormattedTextFragment::hyperlink_action(
+                        "Bring your own key",
+                        WorkspaceAction::ShowSettingsPageWithSearch {
+                            search_query: "api".to_string(),
+                            section: Some(SettingsSection::WarpAgent),
+                        },
+                    ),
+                ]
+            } else {
+                vec![
+                    FormattedTextFragment::plain_text(format!(
+                        "{display_name} is not available for free users. "
+                    )),
+                    FormattedTextFragment::hyperlink("Upgrade", upgrade_url),
+                ]
+            };
 
             let upgrade_text = FormattedTextElement::new(
                 FormattedText::new([FormattedTextLine::Line(text_fragments)]),

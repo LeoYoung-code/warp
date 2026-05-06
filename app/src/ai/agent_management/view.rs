@@ -1252,7 +1252,7 @@ impl AgentManagementView {
 
                 let window_id = ctx.window_id();
                 ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                    let toast = DismissibleToast::default("Copied branch name".to_string());
+                    let toast = DismissibleToast::default(crate::t!("ai-copied-branch-name-toast"));
                     toast_stack.add_ephemeral_toast(toast, window_id, ctx);
                 });
             }
@@ -1885,13 +1885,6 @@ impl AgentManagementView {
             metadata_parts.push(crate::t!(
                 "agent-management-metadata-run-time",
                 run_time = run_time.as_str()
-            ));
-        }
-
-        if let Some(usage) = card_data.display_request_usage(app) {
-            metadata_parts.push(crate::t!(
-                "agent-management-metadata-credits-used",
-                usage = usage.as_str()
             ));
         }
 
