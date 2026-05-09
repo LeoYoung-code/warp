@@ -8,6 +8,8 @@ BRANCH="${BRANCH:-main}"
 PUBLISH_REMOTE="${PUBLISH_REMOTE:-publish}"
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 RELEASE_WORKFLOW="${RELEASE_WORKFLOW:-openwarp_macos_release.yml}"
+PUBLISH_REMOTE_URL="${PUBLISH_REMOTE_URL:-https://github.com/$PUBLISH_REPO.git}"
+UPSTREAM_REMOTE_URL="${UPSTREAM_REMOTE_URL:-https://github.com/$UPSTREAM_REPO.git}"
 MODE="dry-run"
 
 usage() {
@@ -24,6 +26,8 @@ Environment overrides:
   PUBLISH_REMOTE    default: publish
   UPSTREAM_REMOTE   default: upstream
   RELEASE_WORKFLOW  default: openwarp_macos_release.yml
+  PUBLISH_REMOTE_URL default: https://github.com/$PUBLISH_REPO.git
+  UPSTREAM_REMOTE_URL default: https://github.com/$UPSTREAM_REPO.git
 USAGE
 }
 
@@ -174,8 +178,8 @@ if [[ "$MODE" == "execute" && -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-ensure_remote "$PUBLISH_REMOTE" "https://github.com/$PUBLISH_REPO.git"
-ensure_remote "$UPSTREAM_REMOTE" "https://github.com/$UPSTREAM_REPO.git"
+ensure_remote "$PUBLISH_REMOTE" "$PUBLISH_REMOTE_URL"
+ensure_remote "$UPSTREAM_REMOTE" "$UPSTREAM_REMOTE_URL"
 
 git fetch "$PUBLISH_REMOTE" "$BRANCH" --tags
 git fetch "$UPSTREAM_REMOTE" "$BRANCH"
@@ -186,12 +190,6 @@ if git merge-base --is-ancestor "$UPSTREAM_REMOTE/$BRANCH" "$PUBLISH_REMOTE/$BRA
 fi
 
 tag="$(next_tag_for_today)"
-existing_tag_for_publish_sha="$(git tag --points-at "$publish_sha" 'openwarp-v*' | head -1 || true)"
-
-if [[ -n "$existing_tag_for_publish_sha" ]]; then
-  log "Publish commit already has release tag $existing_tag_for_publish_sha; skip."
-  exit 0
-fi
 
 merge_branch="automation/openwarp-upstream-sync-$(date +%Y%m%d-%H%M%S)"
 log "merge branch: $merge_branch"
