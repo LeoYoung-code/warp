@@ -221,7 +221,6 @@ use crate::ai::{
         PRE_REWIND_PREFIX,
     },
     execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId},
-    get_relevant_files::controller::GetRelevantFilesController,
 };
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::auth_state::AuthState;
@@ -2577,7 +2576,6 @@ pub struct TerminalView {
     ai_action_model: ModelHandle<BlocklistAIActionModel>,
     ai_input_model: ModelHandle<BlocklistAIInputModel>,
     ai_context_model: ModelHandle<BlocklistAIContextModel>,
-    get_relevant_files_controller: ModelHandle<GetRelevantFilesController>,
 
     pending_env_var_collection: Option<CloudEnvVarCollection>,
 
@@ -3248,13 +3246,11 @@ impl TerminalView {
             model
         });
 
-        let get_relevant_files_controller = ctx.add_model(GetRelevantFilesController::new);
         let ai_action_model = ctx.add_model(|ctx| {
             BlocklistAIActionModel::new(
                 model.clone(),
                 active_session.clone(),
                 &model_events_handle,
-                get_relevant_files_controller.clone(),
                 terminal_view_id,
                 ctx,
             )
@@ -4004,7 +4000,6 @@ impl TerminalView {
             passive_suggestions_models,
             ai_action_model,
             ai_render_context,
-            get_relevant_files_controller,
             shared_session: None,
             pending_share_source: None,
             auto_stop_sharing_on_cli_end: false,
@@ -5038,7 +5033,6 @@ impl TerminalView {
                             response_stream_id: response_stream_id.clone(),
                         },
                         self.ai_controller.clone(),
-                        self.get_relevant_files_controller.clone(),
                         self.pwd(),
                         self.shell_launch_data_if_local(ctx),
                         self.ai_action_model.clone(),
@@ -14534,6 +14528,17 @@ impl TerminalView {
             }
         }
 
+        // Then check if there's selected text inside any AI block (rich content). The grid-level
+        // `selection_to_string` below ignores AI block `SelectableArea` selections, so without this
+        // branch Ctrl+Shift+C silently does nothing when the user has selected text inside an AI reply.
+        if let Some(selected_text) = self.selected_text_from_visible_ai_blocks(ctx) {
+            if !selected_text.is_empty() {
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(selected_text));
+            }
+            return;
+        }
+
         // Then check if there's selected text in the cloud mode error screen
         let error_selected_text = self
             .ambient_agent_view_model
@@ -18613,6 +18618,19 @@ impl TerminalView {
         })
     }
 
+    /// 在所有可见的 AI block 子视图层里查找已被用户选中的文本。
+    ///
+    /// AI block 的 rich content 选区由 `SelectableArea` 维护,与终端 grid 选区是两套
+    /// 互不通气的系统;`selection_to_string` 只会读 grid 选区,因此 Ctrl+Shift+C 与右键
+    /// 菜单的 `Copy` 都会漏掉 AI block 内的选区。这里集中提供一个兜底:遍历所有 AI block,
+    /// 取第一个 `selected_text(ctx).is_some()` 的结果即可。
+    fn selected_text_from_visible_ai_blocks(&self, ctx: &AppContext) -> Option<String> {
+        self.rich_content_views.iter().find_map(|rich_content| {
+            let ai_metadata = rich_content.ai_block_metadata()?;
+            ai_metadata.ai_block_handle.as_ref(ctx).selected_text(ctx)
+        })
+    }
+
     /// Returns the last block's `EnvVarCollectionBlock` if it is uncompleted, scoped to the
     /// currently visible conversation.
     fn active_env_var_collection_block(
@@ -18917,8 +18935,20 @@ impl TerminalView {
     }
 
     fn context_menu_copy_selected_text(&mut self, ctx: &mut ViewContext<Self>) {
+        send_telemetry_from_ctx!(TelemetryEvent::ContextMenuCopySelectedText, ctx);
+
+        // 优先试 AI block 内选区(详见 `selected_text_from_visible_ai_blocks` 注释)。
+        // 放在 `model.lock()` 之前,避免在终端模型锁持锁期间调用可能再次加锁的代码。
+        if let Some(selected_text) = self.selected_text_from_visible_ai_blocks(ctx) {
+            if !selected_text.is_empty() {
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(selected_text));
+            }
+            self.close_context_menu(ctx, true);
+            return;
+        }
+
         {
-            send_telemetry_from_ctx!(TelemetryEvent::ContextMenuCopySelectedText, ctx);
             let semantic_selection = SemanticSelection::as_ref(ctx);
             let model = self.model.lock();
             if let Some(selected_text) =
@@ -20393,7 +20423,6 @@ impl TerminalView {
                     response_stream_id: None,
                 },
                 self.ai_controller.clone(),
-                self.get_relevant_files_controller.clone(),
                 None,
                 None,
                 self.ai_action_model.clone(),
@@ -23384,22 +23413,31 @@ impl TerminalView {
     }
 
     /// Starts all enabled LSP servers for the current working directory.
+    ///
+    /// 优先使用检测到的 git 仓库根 (`current_repo_path`) 作为
+    /// `workspace_root` 传给 LSP——这样在子目录里 cd 时也能正确取到整仓库,
+    /// 避免为同一仓库不同子路径重复启动 LSP。拿不到 repo 根时 fallback 到 cwd,
+    /// 交给下游 `workspace_root_for_lsp` 再判断是否要启动。
     #[cfg(feature = "local_fs")]
     fn start_lsp_server_in_active_pwd(&self, ctx: &mut ViewContext<Self>) {
         use crate::ai::persisted_workspace::LspTask;
 
-        let Some(cwd) = self
+        let workspace_root = if let Some(repo_path) = self.current_repo_path.clone() {
+            repo_path
+        } else if let Some(cwd) = self
             .pwd_if_local(ctx)
             .map(PathBuf::from)
             .and_then(|p| p.canonicalize().ok())
-        else {
+        {
+            cwd
+        } else {
             return;
         };
 
         PersistedWorkspace::handle(ctx).update(ctx, |workspace, ctx| {
             workspace.execute_lsp_task(
                 LspTask::Spawn {
-                    file_path: cwd,
+                    file_path: workspace_root,
                     server_type: None,
                 },
                 ctx,
