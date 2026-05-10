@@ -73,6 +73,7 @@ __pycache__/
 
 # Project notes
 .note/
+/.superpowers/
 
 # ProcMon / 临时调试日志
 Logfile.CSV
