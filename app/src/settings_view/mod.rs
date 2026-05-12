@@ -1,4 +1,3 @@
-use self::telemetry::SettingsTelemetryEvent;
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::server::telemetry::MCPServerCollectionPaneEntrypoint;
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
@@ -14,7 +13,6 @@ use crate::{
     pane_group::{
         pane::view, BackingView, Direction, PaneConfiguration, PaneEvent, SplitPaneState,
     },
-    server::server_api::ServerApiProvider,
     settings::{AISettings, BlockVisibilitySettings, SettingsFileError},
     settings_view::mcp_servers_page::MCPServersSettingsPageEvent,
     terminal::{model::blockgrid::BlockGrid, SizeInfo},
@@ -28,7 +26,6 @@ use about_page::AboutPageView;
 use ai_page::{AISettingsPageAction, AISettingsPageEvent, AISettingsPageView, AISubpage};
 use appearance_page::{AppearancePageAction, AppearanceSettingsPageView};
 use code_page::{CodeSettingsPageAction, CodeSettingsPageEvent};
-use environments_page::EnvironmentsPageView;
 use features_page::{FeaturesPageView, FeaturesSettingsPageEvent};
 use itertools::Itertools as _;
 use keybindings::KeybindingsView;
@@ -37,13 +34,11 @@ use mcp_servers_page::MCPServersSettingsPageView;
 use nav::{SettingsNavItem, SettingsUmbrella};
 use pathfinder_geometry::vector::Vector2F;
 use privacy_page::{PrivacyPageView, PrivacyPageViewEvent};
-use referrals_page::{ReferralsPageEvent, ReferralsPageView};
 use settings_file_footer::{render_footer, SettingsFooterKind, SettingsFooterMouseStates};
 use settings_page::{
     MatchData, SettingsPage, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle,
     HEADER_PADDING,
 };
-use show_blocks_view::{ShowBlocksEvent, ShowBlocksView};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -73,14 +68,11 @@ use warpui::{
 
 mod about_page;
 mod admin_actions;
-mod agent_assisted_environment_modal;
 mod agent_providers_widget;
 mod ai_page;
 mod appearance_page;
 mod code_page;
-mod delete_environment_confirmation_dialog;
 mod directory_color_add_picker;
-pub(crate) mod environments_page;
 mod execution_profile_view;
 mod features;
 mod features_page;
@@ -94,15 +86,17 @@ pub mod pane_manager;
 // Warp Inc 云端 API key 管理 UI 一同物理删。
 mod privacy;
 mod privacy_page;
-mod referrals_page;
+// OpenWarp Wave 6-8:`referrals_page` / `show_blocks_view` 随 `ReferralsClient` /
+// `BlockClient` trait 物理删 —— 两个页面全部 stub Err / 空列表,本地无价值。
 mod settings_file_footer;
 pub(crate) mod settings_page;
-mod show_blocks_view;
 mod tab_menu;
 mod teams_page;
-mod telemetry;
+// OpenWarp Wave 7-3:`telemetry` 随唯一 variant `EnvironmentsPageOpened` (Cloud Mode UI)
+// 一同物理删。
 mod transfer_ownership_confirmation_modal;
-pub mod update_environment_form;
+// OpenWarp Wave 7-2:`update_environment_form` 随 cloud ambient agent 主体物理删 ——
+// `terminal::view::ambient_agent::first_time_setup` 与 `cloud_environments` 一同下线。
 mod warp_drive_page;
 mod warpify_page;
 
@@ -186,8 +180,6 @@ pub enum SettingsSection {
     Features,
     Keybindings,
     Privacy,
-    Referrals,
-    SharedBlocks,
     Teams,
     WarpDrive,
     Warpify,
@@ -212,10 +204,9 @@ pub enum SettingsSection {
     /// removed.
     Code,
     EditorAndCodeReview,
-    // ── Cloud platform umbrella subpages ──
-    CloudEnvironments,
     // OpenWarp Wave 3-1:`OzCloudAPIKeys` enum variant 随 Warp Inc API key 管理 UI
     // 一同物理删。
+    // OpenWarp Wave 7-3:`CloudEnvironments` 随 Cloud Mode UI 子系统物理删。
 }
 
 use crate::util::bindings::custom_tag_to_keystroke;
@@ -231,8 +222,6 @@ impl Display for SettingsSection {
             SettingsSection::Features => crate::t!("settings-section-features"),
             SettingsSection::Keybindings => crate::t!("settings-section-keybindings"),
             SettingsSection::Privacy => crate::t!("settings-section-privacy"),
-            SettingsSection::Referrals => crate::t!("settings-section-referrals"),
-            SettingsSection::SharedBlocks => crate::t!("settings-section-shared-blocks"),
             SettingsSection::Teams => crate::t!("settings-section-teams"),
             SettingsSection::WarpDrive => crate::t!("settings-section-warp-drive"),
             SettingsSection::Warpify => crate::t!("settings-section-warpify"),
@@ -248,9 +237,8 @@ impl Display for SettingsSection {
             SettingsSection::Code => crate::t!("settings-section-code"),
             SettingsSection::EditorAndCodeReview => {
                 crate::t!("settings-section-editor-and-code-review")
-            }
-            SettingsSection::CloudEnvironments => crate::t!("settings-section-cloud-environments"),
-            // OpenWarp Wave 3-1:`OzCloudAPIKeys` Display arm 随 variant 一同物理删。
+            } // OpenWarp Wave 3-1:`OzCloudAPIKeys` Display arm 随 variant 一同物理删。
+              // OpenWarp Wave 7-3:`CloudEnvironments` Display arm 随 variant 物理删。
         };
         write!(f, "{s}")
     }
@@ -259,7 +247,7 @@ impl Display for SettingsSection {
 impl SettingsSection {
     /// Returns true if this section is a subpage under any umbrella.
     pub fn is_subpage(&self) -> bool {
-        self.is_ai_subpage() || self.is_cloud_platform_subpage()
+        self.is_ai_subpage()
     }
 
     /// Returns true if this section is a subpage under the "Agents" umbrella.
@@ -275,11 +263,6 @@ impl SettingsSection {
         )
     }
 
-    /// Returns true if this section is a subpage under the "Cloud platform" umbrella.
-    pub fn is_cloud_platform_subpage(&self) -> bool {
-        matches!(self, Self::CloudEnvironments)
-    }
-
     /// Maps subpage sections back to their parent page section for page lookup.
     /// Non-subpage sections return themselves.
     pub fn parent_page_section(&self) -> Self {
@@ -290,8 +273,8 @@ impl SettingsSection {
             s if s.is_ai_subpage() => Self::AI,
             // EditorAndCodeReview is the only label still pointing at the Code page.
             Self::EditorAndCodeReview => Self::Code,
-            // CloudEnvironments 是自身如独立 backing page。
             // OpenWarp Wave 3-1:`OzCloudAPIKeys` 随 UI 一同物理删。
+            // OpenWarp Wave 7-3:`CloudEnvironments` umbrella 随 Cloud Mode UI 一同物理删。
             other => *other,
         }
     }
@@ -306,11 +289,6 @@ impl SettingsSection {
             Self::Knowledge,
             Self::ThirdPartyCLIAgents,
         ]
-    }
-
-    /// The ordered list of Cloud platform subpage sections.
-    pub fn cloud_platform_subpages() -> &'static [Self] {
-        &[Self::CloudEnvironments]
     }
 }
 
@@ -328,8 +306,6 @@ impl FromStr for SettingsSection {
             "Features" => Ok(Self::Features),
             "Keyboard shortcuts" => Ok(Self::Keybindings),
             "Privacy" => Ok(Self::Privacy),
-            "Referrals" => Ok(Self::Referrals),
-            "Shared blocks" => Ok(Self::SharedBlocks),
             "Teams" => Ok(Self::Teams),
             "Warpify" => Ok(Self::Warpify),
             "WarpDrive" | "Warp Drive" => Ok(Self::WarpDrive),
@@ -341,8 +317,8 @@ impl FromStr for SettingsSection {
             "Knowledge" => Ok(Self::Knowledge),
             "Third party CLI agents" | "ThirdPartyCLIAgents" => Ok(Self::ThirdPartyCLIAgents),
             "Editor and Code Review" | "EditorAndCodeReview" => Ok(Self::EditorAndCodeReview),
-            "CloudEnvironments" => Ok(Self::CloudEnvironments),
             // OpenWarp Wave 3-1:`OzCloudAPIKeys` 随 UI 一同物理删。
+            // OpenWarp Wave 7-3:`CloudEnvironments` FromStr arm 随 variant 物理删。
             _ => Err(()),
         }
     }
@@ -956,15 +932,14 @@ macro_rules! update_page {
             SettingsPageViewHandle::Main(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Appearance(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Features(handle) => $ctx.update_view(handle, $update),
-            SettingsPageViewHandle::SharedBlocks(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Keybindings(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Teams(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Warpify(handle) => $ctx.update_view(handle, $update),
             // OpenWarp Wave 3-1:`OzCloudAPIKeys` arm 随 variant 一同物理删。
+            // OpenWarp Wave 6-8:`SharedBlocks` / `Referrals` arm 随 variant 物理删。
+            // OpenWarp Wave 7-3:`CloudEnvironments` arm 随 Cloud Mode UI 一同物理删。
             SettingsPageViewHandle::Privacy(handle) => $ctx.update_view(handle, $update),
-            SettingsPageViewHandle::Referrals(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::AI(handle) => $ctx.update_view(handle, $update),
-            SettingsPageViewHandle::CloudEnvironments(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::About(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Code(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::MCPServers(handle) => $ctx.update_view(handle, $update),
@@ -983,7 +958,6 @@ pub struct SettingsView {
     clipped_scroll_state: ClippedScrollStateHandle,
     context_menu: ViewHandle<Menu<SettingsAction>>,
     context_menu_state: Option<Vector2F>,
-    environments_page_handle: ViewHandle<EnvironmentsPageView>,
     /// Sidebar navigation items (pages + umbrellas).
     nav_items: Vec<SettingsNavItem>,
     /// Handle to the AI settings page, used to switch subpage modes.
@@ -1033,19 +1007,8 @@ impl SettingsView {
             me.handle_features_page_event(event, ctx);
         });
 
-        // Shared blocks page
-        let block_client = ServerApiProvider::as_ref(ctx).get_block_client();
-        let show_blocks_view_handle =
-            ctx.add_typed_action_view(|ctx| ShowBlocksView::new(block_client, ctx));
-
-        ctx.subscribe_to_view(&show_blocks_view_handle, |_, _, event, ctx| match event {
-            ShowBlocksEvent::ShowToast { message, flavor } => {
-                ctx.emit(SettingsViewEvent::ShowToast {
-                    message: message.clone(),
-                    flavor: *flavor,
-                })
-            }
-        });
+        // OpenWarp Wave 6-8:Shared blocks 设置页随 `ShowBlocksView` / `BlockClient`
+        // 物理删,handle / 事件订阅一同移除。
 
         // About page
         let about_page_handle = ctx.add_typed_action_view(AboutPageView::new);
@@ -1058,10 +1021,7 @@ impl SettingsView {
         });
 
         // Environments page
-        let environments_page_handle = ctx.add_typed_action_view(EnvironmentsPageView::new);
-        ctx.subscribe_to_view(&environments_page_handle, |me, _, event, ctx| {
-            me.handle_environments_page_event(event, ctx);
-        });
+        // OpenWarp Wave 7-3:`environments_page_handle` 随 Cloud Mode UI 子系统物理删。
 
         // Keybindings page
         let keybindings_handle = ctx.add_typed_action_view(KeybindingsView::new);
@@ -1098,12 +1058,8 @@ impl SettingsView {
             me.handle_privacy_page_event(event, ctx);
         });
 
-        let referrals_client = ServerApiProvider::as_ref(ctx).get_referrals_client();
-        let referrals_page_handle =
-            ctx.add_typed_action_view(|ctx| ReferralsPageView::new(referrals_client, ctx));
-        ctx.subscribe_to_view(&referrals_page_handle, |me, _, event, ctx| {
-            me.handle_referrals_page_event(event, ctx);
-        });
+        // OpenWarp Wave 6-8:Referrals 设置页随 `ReferralsPageView` / `ReferralsClient`
+        // 物理删,handle / 事件订阅一同移除。
 
         // Warp Drive page
         let warp_drive_page_handle =
@@ -1158,14 +1114,11 @@ impl SettingsView {
             SettingsPage::new(keybindings_handle),
             // OpenWarp Wave 3-1:`platform_page_handle` 随 UI 一同物理删。
             SettingsPage::new(warpify_page_handle),
-            SettingsPage::new(referrals_page_handle),
-            SettingsPage::new(show_blocks_view_handle),
             SettingsPage::new(warp_drive_page_handle),
         ];
 
         settings_pages.extend(vec![
             SettingsPage::new(mcp_servers_page_handle),
-            SettingsPage::new(environments_page_handle.clone()),
             SettingsPage::new(privacy_page_handle),
             SettingsPage::new(about_page_handle),
         ]);
@@ -1224,7 +1177,6 @@ impl SettingsView {
             clipped_scroll_state: Default::default(),
             context_menu,
             context_menu_state: Default::default(),
-            environments_page_handle,
             nav_items,
             ai_page_handle: ai_page_handle_for_nav,
             code_page_handle: code_page_handle_for_nav,
@@ -1564,32 +1516,14 @@ impl SettingsView {
     ) {
         match event {
             SettingsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            SettingsPageEvent::Pane(_)
-            | SettingsPageEvent::EnvironmentSetupModeSelectorToggled { .. }
-            | SettingsPageEvent::AgentAssistedEnvironmentModalToggled { .. } => {
+            SettingsPageEvent::Pane(_) => {
                 // These events are not handled in standalone settings - only used
                 // when the view is hosted inside a pane.
             }
         }
     }
 
-    fn handle_environments_page_event(
-        &mut self,
-        event: &SettingsPageEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            SettingsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            SettingsPageEvent::EnvironmentSetupModeSelectorToggled { .. }
-            | SettingsPageEvent::AgentAssistedEnvironmentModalToggled { .. } => {
-                // Re-render so the modal overlay is shown/hidden.
-                ctx.notify();
-            }
-            SettingsPageEvent::Pane(_) => {
-                // Not applicable in standalone settings view.
-            }
-        }
-    }
+    // OpenWarp Wave 7-3:`handle_environments_page_event` 随 Cloud Mode UI 子系统物理删。
 
     fn handle_features_page_event(
         &mut self,
@@ -1611,9 +1545,7 @@ impl SettingsView {
     ) {
         match event {
             SettingsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            SettingsPageEvent::Pane(_)
-            | SettingsPageEvent::EnvironmentSetupModeSelectorToggled { .. }
-            | SettingsPageEvent::AgentAssistedEnvironmentModalToggled { .. } => {
+            SettingsPageEvent::Pane(_) => {
                 // These events are not handled in standalone settings - only used
                 // when the view is hosted inside a pane.
             }
@@ -1664,25 +1596,6 @@ impl SettingsView {
             if let SettingsPageViewHandle::Keybindings(view_handle) = &settings_page.view_handle {
                 view_handle.update(ctx, |view, ctx| {
                     view.search_for_binding(keybinding_name, ctx);
-                })
-            }
-        }
-    }
-
-    fn handle_referrals_page_event(
-        &mut self,
-        event: &ReferralsPageEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            ReferralsPageEvent::SignupAnonymousUser => {
-                ctx.emit(SettingsViewEvent::SignupAnonymousUser)
-            }
-            ReferralsPageEvent::FocusModal => ctx.focus(&self.search_editor),
-            ReferralsPageEvent::ShowToast { message, flavor } => {
-                ctx.emit(SettingsViewEvent::ShowToast {
-                    message: message.clone(),
-                    flavor: *flavor,
                 })
             }
         }
@@ -1796,9 +1709,9 @@ impl SettingsView {
             self.clear_search_query(ctx);
         }
         self.current_settings_page = section;
-        if previous_section != section && section == SettingsSection::CloudEnvironments {
-            send_telemetry_from_ctx!(SettingsTelemetryEvent::EnvironmentsPageOpened, ctx);
-        }
+        // OpenWarp Wave 7-3:`SettingsTelemetryEvent::EnvironmentsPageOpened` 随 Cloud Mode UI
+        // 子系统物理删。
+        let _ = previous_section;
 
         // When navigating to a subpage, update the backing page's active subpage mode
         // and auto-expand the umbrella containing it.
@@ -1858,17 +1771,15 @@ impl SettingsView {
         match &settings_page.view_handle {
             SettingsPageViewHandle::Main(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Teams(v) => v.as_ref(app).should_render(app),
-            SettingsPageViewHandle::SharedBlocks(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Keybindings(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Features(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Appearance(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::About(v) => v.as_ref(app).should_render(app),
             // OpenWarp Wave 3-1:`OzCloudAPIKeys` arm 随 variant 一同物理删。
+            // OpenWarp Wave 6-8:`SharedBlocks` / `Referrals` arm 随 variant 物理删。
             SettingsPageViewHandle::Privacy(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Warpify(v) => v.as_ref(app).should_render(app),
-            SettingsPageViewHandle::Referrals(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::AI(v) => v.as_ref(app).should_render(app),
-            SettingsPageViewHandle::CloudEnvironments(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::MCPServers(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Code(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::WarpDrive(v) => v.as_ref(app).should_render(app),
@@ -2383,23 +2294,8 @@ impl View for SettingsView {
             );
         }
 
-        // Render environment setup mode selector overlay when open.
-        if let Some(selector_handle) = self
-            .environments_page_handle
-            .as_ref(app)
-            .environment_setup_mode_selector_handle()
-        {
-            stack.add_child(ChildView::new(selector_handle).finish());
-        }
-
-        // Render agent-assisted environment modal overlay when open.
-        if let Some(modal_handle) = self
-            .environments_page_handle
-            .as_ref(app)
-            .agent_assisted_environment_modal_handle(app)
-        {
-            stack.add_child(ChildView::new(modal_handle).finish());
-        }
+        // OpenWarp Wave 7-3:environment setup mode selector / agent-assisted environment
+        // modal 覆盖渲染随 Cloud Mode UI 子系统物理删。
 
         SavePosition::new(stack.finish(), POSITION_ID).finish()
     }

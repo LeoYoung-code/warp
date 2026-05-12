@@ -36,11 +36,14 @@ pub use request_usage_model::*;
 use warpui::AppContext;
 #[cfg(not(target_family = "wasm"))]
 pub mod agent_sdk;
-pub mod cloud_agent_settings;
+// OpenWarp Wave 7-3:`cloud_agent_settings` 随 Cloud Mode UI 子系统物理删。
+// OpenWarp Wave 7-2:Cloud environments 的 CLI / 表单 / 环境准备链路已删；
+// 本地对象数据类型仍暂存于此，供 CloudModel 反序列化与现有视图过滤使用。
 pub mod cloud_environments;
 pub mod execution_profiles;
 pub mod facts;
-pub(crate) mod generate_block_title;
+// OpenWarp Wave 6-8:`generate_block_title` 随 `BlockClient::generate_shared_block_title`
+// stub 一同移除 —— 唯一消费点是 BlockClient trait 签名,本地无其他代码路径。
 pub(crate) mod generate_code_review_content;
 pub(crate) mod loading;
 pub mod mcp;

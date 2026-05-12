@@ -34,7 +34,6 @@ use crate::ai::ambient_agents::telemetry::{CloudAgentTelemetryEvent, CloudModeEn
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarEditorMode;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::ai::blocklist::history_model::load_conversation_from_server;
 use crate::ai::blocklist::suggested_agent_mode_workflow_modal::SuggestedAgentModeWorkflowAndId;
 use crate::ai::blocklist::suggested_rule_modal::{
     SuggestedRuleAndId, SuggestedRuleModal, SuggestedRuleModalEvent,
@@ -101,7 +100,7 @@ use crate::util::openable_file_type::FileTarget;
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::{resolve_file_target_with_editor_choice, EditorLayout};
 
-use crate::ai::blocklist::history_model::CloudConversationData;
+use crate::ai::blocklist::history_model::LoadedConversationData;
 use crate::ai::blocklist::FORK_PREFIX;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
@@ -150,8 +149,8 @@ use crate::drive::export::ExportManager;
 use crate::drive::settings::WarpDriveSettings;
 use crate::launch_configs::launch_config::WindowTemplate;
 use crate::pane_group::{
-    AIFactPane, CodeReviewPanelArg, Direction as PaneGroupDirection, EnvironmentManagementPane,
-    ExecutionProfileEditorPane, PaneGroup, PaneId, TerminalPaneId,
+    AIFactPane, CodeReviewPanelArg, Direction as PaneGroupDirection, ExecutionProfileEditorPane,
+    PaneGroup, PaneId, TerminalPaneId,
 };
 use crate::quit_warning::UnsavedStateSummary;
 use crate::search::command_palette::view::NavigationMode;
@@ -162,7 +161,8 @@ use crate::settings::{
     AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, CtrlTabBehavior,
     DefaultSessionMode, InputModeSettings,
 };
-use crate::settings_view::environments_page::EnvironmentsPage;
+// OpenWarp Wave 7-3:`environments_page::EnvironmentsPage` import 随 Cloud Mode UI
+// 子系统物理删。
 use crate::settings_view::pane_manager::SettingsPaneManager;
 use crate::settings_view::{SettingsSection, SettingsView, SettingsViewEvent};
 #[cfg(all(target_os = "windows", feature = "local_tty"))]
@@ -594,6 +594,7 @@ pub(crate) const LEFT_PANEL_WARP_DRIVE_BINDING_NAME: &str = "workspace:left_pane
 pub(crate) const LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME: &str =
     "workspace:left_panel_agent_conversations";
 pub(crate) const LEFT_PANEL_SSH_MANAGER_BINDING_NAME: &str = "workspace:left_panel_ssh_manager";
+pub(crate) const LEFT_PANEL_SKILL_MANAGER_BINDING_NAME: &str = "workspace:left_panel_skill_manager";
 
 const KEYBINDINGS_TO_CACHE: [&str; 4] = [
     ASK_AI_ASSISTANT_KEYBINDING_NAME,
@@ -3612,6 +3613,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
                 LeftPanelDisplayedTab::SshManager => ToolPanelView::SshManager,
+                LeftPanelDisplayedTab::SkillManager => ToolPanelView::SkillManager,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
             lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
@@ -3687,7 +3689,9 @@ impl Workspace {
             // We open Warp Drive automatically in two cases:
             // * The user is new to Warp, and went through the overall onboarding flow
             // * The user is on the web, so we can't open a terminal session.
-            let initial_load_complete = UpdateManager::as_ref(ctx).initial_load_complete();
+            let initial_load_complete =
+                crate::cloud_object::model::persistence::CloudModel::as_ref(ctx)
+                    .initial_load_complete();
             ctx.spawn(initial_load_complete, move |me, _, ctx| {
                 // New Warp users can have non-welcome objects if they were directly invited OR if
                 // linked objects were copied over from an anonymous user.
@@ -3758,41 +3762,26 @@ impl Workspace {
         self.activate_tab_internal(self.tab_count() - 1, ctx);
     }
 
-    /// Opens a cloud conversation by server token.
-    /// If the current user owns or created it, navigate to its open pane or restore it
-    /// into a new tab. Otherwise, open the read-only transcript viewer.
+    /// 兼容旧的 server token 入口:仅打开本地已经恢复过的 conversation。
     pub fn open_cloud_conversation_from_server_token(
         &mut self,
         server_token: ServerConversationToken,
         ctx: &mut ViewContext<Self>,
     ) {
-        let history = BlocklistAIHistoryModel::as_ref(ctx);
-        let Some(conversation_id) = history.find_conversation_id_by_server_token(&server_token)
+        let Some(conversation_id) =
+            Self::find_local_conversation_id_by_server_token(&server_token, ctx)
         else {
-            self.load_cloud_conversation_into_new_transcript_viewer(server_token, ctx);
-            return;
-        };
-
-        // Check whether the conversation was started/is owned by by the current user.
-        let user_id = AuthStateProvider::as_ref(ctx).get().user_id();
-        let server_metadata = history.get_server_conversation_metadata(&conversation_id);
-        let conversation_is_owned_by_current_user = match (user_id, server_metadata) {
-            (Some(user_uid), Some(metadata)) => {
-                let is_creator =
-                    metadata.metadata.creator_uid.as_deref() == Some(&*user_uid.to_string());
-                let is_owner = matches!(
-                    metadata.permissions.space,
-                    Owner::User { user_uid: ref owner } if *owner == user_uid
+            self.show_local_conversation_not_found_toast(ctx);
+            if self.tab_count() == 0 {
+                self.add_tab_with_pane_layout(
+                    Default::default(),
+                    Arc::new(HashMap::new()),
+                    None,
+                    ctx,
                 );
-                is_creator || is_owner
             }
-            _ => false,
-        };
-
-        if !conversation_is_owned_by_current_user {
-            self.load_cloud_conversation_into_new_transcript_viewer(server_token, ctx);
             return;
-        }
+        };
 
         // If the conversation is open in a pane this session, grab its nav data so we can
         // navigate directly to it. Otherwise we'll restore from scratch into a new tab.
@@ -3824,88 +3813,20 @@ impl Workspace {
         }
     }
 
-    /// Load the conversation into a transcript viewer in a new tab (with no input/backing shell)
-    pub fn load_cloud_conversation_into_new_transcript_viewer(
-        &mut self,
-        conversation_id: ServerConversationToken,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        // Create the tab immediately with a loading state
-        let new_pane_group = ctx.add_typed_action_view(|ctx| {
-            PaneGroup::new_for_conversation_transcript_viewer_loading(
-                self.tips_completed.clone(),
-                self.user_default_shell_unsupported_banner_model_handle
-                    .clone(),
-                self.server_api.clone(),
-                self.model_event_sender.clone(),
-                ctx,
-            )
+    fn find_local_conversation_id_by_server_token(
+        server_token: &ServerConversationToken,
+        ctx: &AppContext,
+    ) -> Option<AIConversationId> {
+        BlocklistAIHistoryModel::as_ref(ctx).find_conversation_id_by_server_token(server_token)
+    }
+
+    fn show_local_conversation_not_found_toast(&mut self, ctx: &mut ViewContext<Self>) {
+        self.toast_stack.update(ctx, |view, ctx| {
+            let new_toast = DismissibleToast::error(
+                "Conversation is not available in local OpenWarp history.".to_string(),
+            );
+            view.add_ephemeral_toast(new_toast, ctx);
         });
-
-        ctx.subscribe_to_view(&new_pane_group, move |me, pane_group, event, ctx| {
-            me.handle_file_tree_event(pane_group, event, ctx)
-        });
-
-        self.tabs.push(TabData::new(new_pane_group.clone()));
-        let new_tab_index = self.tab_count() - 1;
-        self.activate_tab_internal(new_tab_index, ctx);
-
-        let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
-        let server_token = conversation_id;
-
-        ctx.spawn(
-            async move {
-                load_conversation_from_server(AIConversationId::default(), server_token, ai_client)
-                    .await
-            },
-            move |me, cloud_conversation, ctx| {
-                let Some(cloud_conversation) = cloud_conversation else {
-                    log::error!("Failed to load conversation from server");
-                    me.toast_stack.update(ctx, |view, ctx| {
-                        let new_toast = DismissibleToast::error(
-                            "Failed to load conversation data.".to_string(),
-                        );
-                        view.add_ephemeral_toast(new_toast, ctx);
-                    });
-                    return;
-                };
-
-                // Update the pane group with the loaded conversation
-                new_pane_group.update(ctx, |pane_group, ctx| {
-                    pane_group
-                        .load_data_into_conversation_transcript_viewer(cloud_conversation, ctx);
-                });
-
-                // Open the transcript details panel by default on WASM (unless on mobile)
-                #[cfg(target_family = "wasm")]
-                {
-                    if !warpui::platform::wasm::is_mobile_device() {
-                        me.current_workspace_state.is_transcript_details_panel_open = true;
-                        me.transcript_info_button.update(ctx, |button, ctx| {
-                            button.set_active(true, ctx);
-                        });
-                    }
-                    me.update_transcript_details_panel_data(ctx);
-                }
-
-                // Refresh the focused conversation state.
-                if me.active_tab_pane_group().id() == new_pane_group.id() {
-                    let focused_terminal_view_id = me
-                        .active_tab_pane_group()
-                        .as_ref(ctx)
-                        .active_session_view(ctx)
-                        .map(|view| view.id());
-                    let ambient_agent_task_id = me
-                        .get_active_session_terminal_model(ctx)
-                        .and_then(|model| model.lock().ambient_agent_task_id());
-                    me.notify_terminal_focus_change(
-                        focused_terminal_view_id,
-                        ambient_agent_task_id,
-                        ctx,
-                    );
-                }
-            },
-        );
     }
 
     fn open_share_session_modal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
@@ -5550,6 +5471,27 @@ impl Workspace {
                     CodeSource::FileTree { path: path.clone() },
                     ctx,
                 );
+            }
+            LeftPanelEvent::OpenSkillFile { source } => {
+                #[cfg(feature = "local_fs")]
+                {
+                    let layout = *EditorSettings::as_ref(ctx).open_file_layout.value();
+                    if let Some(path) = source.path() {
+                        self.open_file_with_target(
+                            path,
+                            FileTarget::CodeEditor(layout),
+                            None,
+                            source.clone(),
+                            ctx,
+                        );
+                    } else {
+                        log::error!("failed to open skill file: missing source path");
+                    }
+                }
+                #[cfg(not(feature = "local_fs"))]
+                {
+                    let _ = source;
+                }
             }
             LeftPanelEvent::NewConversationInNewTab => {
                 self.add_terminal_tab_with_new_agent_view(ctx);
@@ -7223,26 +7165,8 @@ impl Workspace {
         });
     }
 
-    /// Open the Environment Management pane in a split pane (default direction is right).
-    pub fn open_environment_management_pane(
-        &mut self,
-        direction: Option<Direction>,
-        mode: EnvironmentsPage,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let direction = direction.unwrap_or(Direction::Right);
-        let environments_page_view = self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
-            let pane = EnvironmentManagementPane::new(ctx);
-            let view = pane.environments_page_view(ctx);
-            pane_group
-                .add_pane_with_direction(direction, pane, true /* focus_new_pane */, ctx);
-            view
-        });
-        // Update page after the pane is added so focus works correctly
-        environments_page_view.update(ctx, |view, ctx| {
-            view.update_page(mode, ctx);
-        });
-    }
+    // OpenWarp Wave 7-3:`open_environment_management_pane` 随 Cloud Mode UI 子系统
+    // 物理删。
 
     pub(super) fn active_session_view(
         &self,
@@ -10317,19 +10241,6 @@ impl Workspace {
             ctx,
         );
 
-        #[cfg(all(feature = "local_tty", not(target_family = "wasm")))]
-        if is_docker_sandbox {
-            if let Some(terminal_view) = self
-                .active_tab_pane_group()
-                .as_ref(ctx)
-                .active_session_view(ctx)
-            {
-                TerminalView::initialize_docker_sandbox_environment(&terminal_view, ctx);
-            } else {
-                log::warn!("Could not find docker sandbox terminal view after creating new tab");
-            }
-        }
-        #[cfg(not(all(feature = "local_tty", not(target_family = "wasm"))))]
         let _ = is_docker_sandbox;
         // If the default session mode is Agent and AI is enabled, enter agent view
         if should_enter_agent_view {
@@ -10886,7 +10797,7 @@ impl Workspace {
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         let future = history_model
             .as_ref(ctx)
-            .load_conversation_data(conversation_id, ctx);
+            .load_conversation_data(conversation_id);
         let terminal_view_for_closure = terminal_view.clone();
         let window_id = ctx.window_id();
         ctx.spawn(future, move |_workspace, conversation, ctx| {
@@ -10951,7 +10862,7 @@ impl Workspace {
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         let future = history_model
             .as_ref(ctx)
-            .load_conversation_data(conversation_id, ctx);
+            .load_conversation_data(conversation_id);
         ctx.spawn(future, move |_workspace, conversation, ctx| {
             let Some(conversation) = conversation else {
                 log::warn!("Failed to load conversation {conversation_id}");
@@ -11021,7 +10932,7 @@ impl Workspace {
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         let future = history_model
             .as_ref(ctx)
-            .load_conversation_data(conversation_id, ctx);
+            .load_conversation_data(conversation_id);
 
         ctx.spawn(future, move |workspace, conversation, ctx| {
             let Some(conversation) = conversation else {
@@ -11126,10 +11037,10 @@ impl Workspace {
         // Load the conversation data asynchronously
         let future = history_model
             .as_ref(ctx)
-            .load_conversation_data(conversation_id, ctx);
+            .load_conversation_data(conversation_id);
 
         ctx.spawn(future, move |workspace, source_conversation, ctx| {
-            let Some(CloudConversationData::Oz(source_conversation)) = source_conversation else {
+            let Some(LoadedConversationData::Oz(source_conversation)) = source_conversation else {
                 log::error!("Failed to load Oz conversation {conversation_id} for forking.");
                 WorkspaceToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                     let toast = DismissibleToast::error(crate::t!(
@@ -13307,13 +13218,8 @@ impl Workspace {
             pane_group::Event::OpenAgentProfileEditor { profile_id } => {
                 self.open_execution_profile_editor_pane(None, *profile_id, ctx);
             }
-            pane_group::Event::OpenEnvironmentManagementPane => {
-                self.open_environment_management_pane(
-                    None,
-                    crate::settings_view::environments_page::EnvironmentsPage::Create,
-                    ctx,
-                );
-            }
+            // OpenWarp Wave 7-3:`pane_group::Event::OpenEnvironmentManagementPane` handler 随
+            // Cloud Mode UI 子系统物理删。
             pane_group::Event::LeftPanelToggled { is_open } => {
                 // Only handle visibility changes from the active pane group.
                 if pane_group.id() == self.active_tab_pane_group().id() {
@@ -15861,6 +15767,9 @@ impl Workspace {
                         ToolPanelView::SshManager => {
                             crate::t!("workspace-left-panel-ssh-manager")
                         }
+                        ToolPanelView::SkillManager => {
+                            crate::t!("workspace-left-panel-skill-manager")
+                        }
                     }
                 } else {
                     crate::t!("workspace-tools-panel-tooltip")
@@ -15923,6 +15832,9 @@ impl Workspace {
                 }
                 ToolPanelView::SshManager => {
                     crate::t!("workspace-left-panel-ssh-manager")
+                }
+                ToolPanelView::SkillManager => {
+                    crate::t!("workspace-left-panel-skill-manager")
                 }
             }
         } else {
@@ -18785,6 +18697,10 @@ impl Workspace {
         }
         // openWarp 独有:SSH 管理器,无 feature flag,默认始终显示。
         views.push(ToolPanelView::SshManager);
+        // openWarp 独有:Skill 管理器,无 feature flag,local_fs 构建下默认显示。
+        if cfg!(feature = "local_fs") {
+            views.push(ToolPanelView::SkillManager);
+        }
         views
     }
 
@@ -20018,9 +19934,8 @@ impl TypedActionView for Workspace {
                     ctx
                 );
             }
-            OpenEnvironmentManagementPane => {
-                self.open_environment_management_pane(None, EnvironmentsPage::Create, ctx);
-            }
+            // OpenWarp Wave 7-3:`OpenEnvironmentManagementPane` WorkspaceAction handler 随
+            // Cloud Mode UI 子系统物理删。
             ToggleAIDocumentPane {
                 document_id,
                 document_version,
@@ -20230,10 +20145,7 @@ impl TypedActionView for Workspace {
                         return;
                     }
                 }
-                self.load_cloud_conversation_into_new_transcript_viewer(
-                    conversation_id.clone(),
-                    ctx,
-                );
+                self.open_cloud_conversation_from_server_token(conversation_id.clone(), ctx);
             }
             ForkAIConversation {
                 conversation_id,
@@ -20577,6 +20489,11 @@ impl TypedActionView for Workspace {
                 let is_showing =
                     self.left_panel_view.as_ref(ctx).active_view() == ToolPanelView::SshManager;
                 self.toggle_left_panel_view(&LeftPanelAction::SshManager, is_showing, ctx);
+            }
+            ToggleSkillManager => {
+                let is_showing =
+                    self.left_panel_view.as_ref(ctx).active_view() == ToolPanelView::SkillManager;
+                self.toggle_left_panel_view(&LeftPanelAction::SkillManager, is_showing, ctx);
             }
             ToggleGlobalSearch => {
                 if FeatureFlag::GlobalSearch.is_enabled()

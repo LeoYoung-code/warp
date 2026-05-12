@@ -1,4 +1,4 @@
-﻿// Suppress warnings about rustdoc style.
+// Suppress warnings about rustdoc style.
 #![allow(clippy::doc_lazy_continuation)]
 // 上游 Warp 裁剪后遗留的孤儿代码暂时保留,统一抑制 dead_code 告警。
 #![allow(dead_code)]
@@ -73,6 +73,7 @@ mod search_bar;
 mod server;
 mod session_management;
 mod shell_indicator;
+mod skill_manager;
 mod ssh_manager;
 mod suggestions;
 mod system;
@@ -1123,6 +1124,7 @@ fn initialize_app(
     let server_api = server_api_provider.as_ref(ctx).get();
     let ai_client = server_api_provider.as_ref(ctx).get_ai_client();
 
+    // OpenWarp:保留 AuthStateProvider singleton 仅用于遗留调用点读取本地占位用户态。
     ctx.add_singleton_model(|_ctx| AuthStateProvider::new(auth_state.clone()));
 
     ctx.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
@@ -1305,10 +1307,7 @@ fn initialize_app(
     ctx.add_singleton_model(|_| pricing::PricingInfoModel::new());
     ctx.add_singleton_model(|ctx| {
         // Not using the *Provider types isn't ideal, but it's worth it for the ability to move managed secrets to a separate crate.
-        ManagedSecretManager::new(
-            server_api_provider.as_ref(ctx).get_managed_secrets_client(),
-            auth_state.clone(),
-        )
+        ManagedSecretManager::new(server_api_provider.as_ref(ctx).get(), auth_state.clone())
     });
 
     #[cfg(target_os = "macos")]
@@ -1374,14 +1373,8 @@ fn initialize_app(
     let user_is_logged_in = auth_state.is_logged_in();
 
     if user_is_logged_in {
-        // Skip refresh_user for CLI mode — the CLI handles auth refresh in
-        // ensure_auth_state so it can detect invalid credentials before running
-        // a command.
-        if !matches!(launch_mode, LaunchMode::CommandLine { .. }) {
-            AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                auth_manager.refresh_user(ctx);
-            });
-        }
+        // OpenWarp 本地 auth facade 在 `AuthState::initialize` 时已把身份快照装载完毕。
+        // 启动阶段不再额外触发一次云端 token refresh / auth refresh。
 
         // Set the first frame callback to record the app's startup time.
         // This is only sent for logged-in users so that new users don't skew performance metrics.
@@ -1549,7 +1542,8 @@ fn initialize_app(
     ai::blocklist::block::status_bar::init(ctx);
     drive::index::init(ctx);
     ai_assistant::panel::init(ctx);
-    settings_view::update_environment_form::init(ctx);
+    // OpenWarp Wave 7-2:`settings_view::update_environment_form::init` 随 cloud ambient agent
+    // 主体子系统物理删。
     env_vars::env_var_collection_block::init(ctx);
     terminal::ssh::install_tmux::init(ctx);
     terminal::ssh::warpify::init(ctx);
@@ -1676,18 +1670,13 @@ fn initialize_app(
     ctx.add_singleton_model(|_| AudibleBell::new());
 
     // This model has to be registered after the user workspaces model because it relies on it,
-    // and before the UpdateManager models because they rely on the TeamTester model.
+    // and before the local workspace/object update models because they rely on the TeamTester model.
     ctx.add_singleton_model(TeamTesterStatus::new);
 
     ctx.add_singleton_model(|ctx| TeamUpdateManager::new(persistence_writer.sender(), ctx));
 
-    ctx.add_singleton_model(|ctx| {
-        UpdateManager::new(
-            persistence_writer.sender(),
-            server_api_provider.as_ref(ctx).get_cloud_objects_client(),
-            ctx,
-        )
-    });
+    // OpenWarp:UpdateManager 只负责本地 cloud object 的内存/SQLite 同步,不再注入云端 client。
+    ctx.add_singleton_model(|ctx| UpdateManager::new(persistence_writer.sender(), ctx));
 
     let toml_file_path = settings::user_preferences_toml_file_path();
     // OpenWarp(本地化,Phase 5):`CloudPreferencesSyncer` 已物理删除。原同步器负责本地
@@ -1718,7 +1707,7 @@ fn initialize_app(
         )
     });
 
-    // MCPGalleryManager subscribes to UpdateManager so that it can be notified when gallery items are updated.
+    // MCPGalleryManager subscribes to UpdateManager so that it can be notified when gallery items are updated locally.
     // The registration of this singleton must be after UpdateManager is registered.
     ctx.add_singleton_model(MCPGalleryManager::new);
 
@@ -1726,13 +1715,13 @@ fn initialize_app(
     ctx.add_singleton_model(SkillManager::new);
 
     // CloudViewModel subscribes to UpdateManager so that it can be notified when objects are
-    // created on the server.
+    // created or mutated in the local object store.
     ctx.add_singleton_model(CloudViewModel::new);
 
-    // AIDocumentModel subscribes to UpdateManager so that it can be notified when notebooks are created on the server.
+    // AIDocumentModel subscribes to UpdateManager so that it can be notified when notebooks are created locally.
     ctx.add_singleton_model(AIDocumentModel::new);
 
-    // AgentConversationsModel subscribes to UpdateManager for RTC task updates.
+    // AgentConversationsModel subscribes to UpdateManager events that still flow through the local updater.
     ctx.add_singleton_model(AgentConversationsModel::new);
 
     // ByoLlmAuthBannerSessionState tracks dismissal of the BYO LLM auth banner (e.g., AWS Bedrock login).
@@ -1769,9 +1758,6 @@ fn initialize_app(
 
     ctx.add_singleton_model(EnvVarCollectionManager::new);
     ctx.add_singleton_model(WorkflowManager::new);
-
-    // OpenWarp(本地化,Phase 5):`ScheduledAgentManager` 需要云端 ambient agent 调度,
-    // FeatureFlag::ScheduledAmbientAgents 在 Phase 3b-1 已下柜,singleton 永不注入。
 
     AutoupdateState::register(ctx, server_api.clone());
 
@@ -2426,9 +2412,8 @@ pub fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::IntegrationCommand,
         #[cfg(feature = "artifact_command")]
         FeatureFlag::ArtifactCommand,
-        // OpenWarp(本地化,Phase 3c-2):CloudEnvironments 下柜。导致 `warp environment`
-        // 子命令拒绝执行与隐藏,且 `warp agent run --environment` 参数不可用。
-        // 本地 harness 运行不依赖云端 environment。
+        // OpenWarp Wave 7-2:`CloudEnvironments` FeatureFlag 随 cloud ambient agent 主体子系统
+        // 物理删 —— `warp environment` 子命令 + `--environment` 参数同步下线。
         #[cfg(all(feature = "simulate_github_unauthed", debug_assertions))]
         FeatureFlag::SimulateGithubUnauthed,
         #[cfg(feature = "session_sharing_acls")]
@@ -2700,12 +2685,8 @@ pub fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::InlineHistoryMenu,
         #[cfg(feature = "inline_repo_menu")]
         FeatureFlag::InlineRepoMenu,
-        #[cfg(feature = "cloud_mode")]
-        FeatureFlag::CloudMode,
-        #[cfg(feature = "cloud_mode_from_local_session")]
-        FeatureFlag::CloudModeFromLocalSession,
-        #[cfg(feature = "cloud_mode_image_context")]
-        FeatureFlag::CloudModeImageContext,
+        // OpenWarp Wave 7-2:`CloudMode` / `CloudModeFromLocalSession` / `CloudModeImageContext`
+        // 随 cloud ambient agent 主体子系统物理删。
         #[cfg(feature = "summarization_via_message_replacement")]
         FeatureFlag::SummarizationViaMessageReplacement,
         #[cfg(feature = "pluggable_notifications")]
@@ -2790,10 +2771,8 @@ pub fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::CodexNotifications,
         #[cfg(feature = "trim_trailing_blank_lines")]
         FeatureFlag::TrimTrailingBlankLines,
-        #[cfg(feature = "cloud_mode_setup_v2")]
-        FeatureFlag::CloudModeSetupV2,
-        #[cfg(feature = "cloud_mode_input_v2")]
-        FeatureFlag::CloudModeInputV2,
+        // OpenWarp Wave 7-2:`CloudModeSetupV2` / `CloudModeInputV2` 随 cloud ambient agent
+        // 主体子系统物理删。
         #[cfg(feature = "configurable_context_window")]
         FeatureFlag::ConfigurableContextWindow,
     ];

@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use mockall::automock;
 use warp_core::report_error;
 
-use super::ServerApi;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::generate_code_review_content::api::{
     GenerateCodeReviewContentRequest, GenerateCodeReviewContentResponse,
@@ -29,7 +28,6 @@ use crate::{
     },
 };
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
-use warp_graphql::queries::get_scheduled_agent_history::ScheduledAgentHistory;
 
 // Re-export ambient agent types for backwards compatibility
 pub use crate::ai::ambient_agents::{
@@ -596,6 +594,19 @@ struct ListAgentsResponse {
     agents: Vec<AgentListItem>,
 }
 
+fn disabled_ai_client_method(method_name: &str) -> anyhow::Error {
+    anyhow!("AI client `{method_name}` is disabled in OpenWarp")
+}
+
+#[derive(Default)]
+pub struct LocalAIClient;
+
+impl LocalAIClient {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 #[cfg_attr(test, automock)]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -650,11 +661,6 @@ pub trait AIClient: 'static + Send + Sync {
         &self,
         task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<serde_json::Value, anyhow::Error>;
-
-    async fn get_scheduled_agent_history(
-        &self,
-        schedule_id: &str,
-    ) -> anyhow::Result<ScheduledAgentHistory, anyhow::Error>;
 
     async fn list_agents(
         &self,
@@ -734,18 +740,6 @@ pub trait AIClient: 'static + Send + Sync {
         message_id: &str,
     ) -> anyhow::Result<ReadAgentMessageResponse, anyhow::Error>;
 
-    /// Fetch a normalized conversation by conversation ID.
-    async fn get_public_conversation(
-        &self,
-        conversation_id: &str,
-    ) -> anyhow::Result<serde_json::Value, anyhow::Error>;
-
-    /// Fetch a normalized conversation by run ID.
-    async fn get_run_conversation(
-        &self,
-        run_id: &str,
-    ) -> anyhow::Result<serde_json::Value, anyhow::Error>;
-
     /// Generates AI copy for code-review flows: commit messages at dialog-open
     /// time and PR titles / bodies at confirm time. `output_type` in the
     /// request picks which of the three the server returns.
@@ -755,13 +749,13 @@ pub trait AIClient: 'static + Send + Sync {
     ) -> Result<GenerateCodeReviewContentResponse, anyhow::Error>;
 }
 
-// OpenWarp:`AIClient` impl 全 38 个方法本地化为 stub。
+// OpenWarp:`AIClient` 由本地 `LocalAIClient` 承担。
 // 调用方都用 `?` 传播 Err / log::warn / fallback,UI 拿到 Err 后只 toast 错误,不会 panic。
-// 对返回值是 `Result<(), _>` 的方法,我们也返回 Err 而非 Ok(()),让上层显式感知"操作未执行";
-// 这与 BlockClient::save_block 等已落地的 stub 模式一致。
+// 其中真正依赖云端数据/副作用的方法继续返回 Err;仅承担"回执/同步"语义的方法改为 no-op
+// `Ok(())`,避免 OpenWarp 本地链路在后台持续打印无意义告警。
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
-impl AIClient for ServerApi {
+impl AIClient for LocalAIClient {
     async fn generate_commands_from_natural_language(
         &self,
         _prompt: String,
@@ -777,9 +771,7 @@ impl AIClient for ServerApi {
         _prompt: String,
         _ai_execution_context: Option<WarpAiExecutionContext>,
     ) -> anyhow::Result<GenerateDialogueResult> {
-        Err(anyhow!(
-            "AI client `generate_dialogue_answer` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("generate_dialogue_answer"))
     }
 
     async fn update_agent_task(
@@ -790,16 +782,14 @@ impl AIClient for ServerApi {
         _conversation_id: Option<String>,
         _status_message: Option<TaskStatusUpdate>,
     ) -> anyhow::Result<(), anyhow::Error> {
-        Err(anyhow!(
-            "AI client `update_agent_task` is disabled in OpenWarp"
-        ))
+        Ok(())
     }
 
     async fn spawn_agent(
         &self,
         _request: SpawnAgentRequest,
     ) -> anyhow::Result<SpawnAgentResponse, anyhow::Error> {
-        Err(anyhow!("AI client `spawn_agent` is disabled in OpenWarp"))
+        Err(disabled_ai_client_method("spawn_agent"))
     }
 
     async fn list_ambient_agent_tasks(
@@ -807,9 +797,7 @@ impl AIClient for ServerApi {
         _limit: i32,
         _filter: TaskListFilter,
     ) -> anyhow::Result<Vec<AmbientAgentTask>, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `list_ambient_agent_tasks` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("list_ambient_agent_tasks"))
     }
 
     async fn list_agent_runs_raw(
@@ -817,69 +805,50 @@ impl AIClient for ServerApi {
         _limit: i32,
         _filter: TaskListFilter,
     ) -> anyhow::Result<serde_json::Value, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `list_agent_runs_raw` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("list_agent_runs_raw"))
     }
 
     async fn get_ambient_agent_task(
         &self,
         _task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<AmbientAgentTask, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_ambient_agent_task` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("get_ambient_agent_task"))
     }
 
     async fn get_agent_run_raw(
         &self,
         _task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<serde_json::Value, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_agent_run_raw` is disabled in OpenWarp"
-        ))
-    }
-
-    async fn get_scheduled_agent_history(
-        &self,
-        _schedule_id: &str,
-    ) -> anyhow::Result<ScheduledAgentHistory, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_scheduled_agent_history` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("get_agent_run_raw"))
     }
 
     async fn list_agents(
         &self,
         _repo: Option<String>,
     ) -> anyhow::Result<Vec<AgentListItem>, anyhow::Error> {
-        Err(anyhow!("AI client `list_agents` is disabled in OpenWarp"))
+        Err(disabled_ai_client_method("list_agents"))
     }
 
     async fn cancel_ambient_agent_task(
         &self,
         _task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<(), anyhow::Error> {
-        Err(anyhow!(
-            "AI client `cancel_ambient_agent_task` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("cancel_ambient_agent_task"))
     }
 
     async fn get_task_attachments(
         &self,
         _task_id: String,
     ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_task_attachments` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("get_task_attachments"))
     }
 
     async fn create_file_artifact_upload_target(
         &self,
         _request: CreateFileArtifactUploadRequest,
     ) -> anyhow::Result<CreateFileArtifactUploadResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `create_file_artifact_upload_target` is disabled in OpenWarp"
+        Err(disabled_ai_client_method(
+            "create_file_artifact_upload_target",
         ))
     }
 
@@ -888,18 +857,14 @@ impl AIClient for ServerApi {
         _artifact_uid: String,
         _checksum: String,
     ) -> anyhow::Result<FileArtifactRecord, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `confirm_file_artifact_upload` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("confirm_file_artifact_upload"))
     }
 
     async fn get_artifact_download(
         &self,
         _artifact_uid: &str,
     ) -> anyhow::Result<ArtifactDownloadResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_artifact_download` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("get_artifact_download"))
     }
 
     async fn prepare_attachments_for_upload(
@@ -907,9 +872,7 @@ impl AIClient for ServerApi {
         _task_id: &AmbientAgentTaskId,
         _files: &[AttachmentFileInfo],
     ) -> anyhow::Result<PrepareAttachmentUploadsResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `prepare_attachments_for_upload` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("prepare_attachments_for_upload"))
     }
 
     async fn download_task_attachments(
@@ -917,17 +880,15 @@ impl AIClient for ServerApi {
         _task_id: &AmbientAgentTaskId,
         _attachment_ids: &[String],
     ) -> anyhow::Result<DownloadAttachmentsResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `download_task_attachments` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("download_task_attachments"))
     }
 
     async fn get_handoff_snapshot_attachments(
         &self,
         _task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_handoff_snapshot_attachments` is disabled in OpenWarp"
+        Err(disabled_ai_client_method(
+            "get_handoff_snapshot_attachments",
         ))
     }
 
@@ -935,9 +896,7 @@ impl AIClient for ServerApi {
         &self,
         _request: SendAgentMessageRequest,
     ) -> anyhow::Result<SendAgentMessageResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `send_agent_message` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("send_agent_message"))
     }
 
     async fn list_agent_messages(
@@ -945,9 +904,7 @@ impl AIClient for ServerApi {
         _run_id: &str,
         _request: ListAgentMessagesRequest,
     ) -> anyhow::Result<Vec<AgentMessageHeader>, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `list_agent_messages` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("list_agent_messages"))
     }
 
     async fn update_event_sequence_on_server(
@@ -955,51 +912,25 @@ impl AIClient for ServerApi {
         _run_id: &str,
         _sequence: i64,
     ) -> anyhow::Result<(), anyhow::Error> {
-        Err(anyhow!(
-            "AI client `update_event_sequence_on_server` is disabled in OpenWarp"
-        ))
+        Ok(())
     }
 
     async fn mark_message_delivered(&self, _message_id: &str) -> anyhow::Result<(), anyhow::Error> {
-        Err(anyhow!(
-            "AI client `mark_message_delivered` is disabled in OpenWarp"
-        ))
+        Ok(())
     }
 
     async fn read_agent_message(
         &self,
         _message_id: &str,
     ) -> anyhow::Result<ReadAgentMessageResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `read_agent_message` is disabled in OpenWarp"
-        ))
-    }
-
-    async fn get_public_conversation(
-        &self,
-        _conversation_id: &str,
-    ) -> anyhow::Result<serde_json::Value, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_public_conversation` is disabled in OpenWarp"
-        ))
-    }
-
-    async fn get_run_conversation(
-        &self,
-        _run_id: &str,
-    ) -> anyhow::Result<serde_json::Value, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `get_run_conversation` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("read_agent_message"))
     }
 
     async fn generate_code_review_content(
         &self,
         _request: GenerateCodeReviewContentRequest,
     ) -> Result<GenerateCodeReviewContentResponse, anyhow::Error> {
-        Err(anyhow!(
-            "AI client `generate_code_review_content` is disabled in OpenWarp"
-        ))
+        Err(disabled_ai_client_method("generate_code_review_content"))
     }
 }
 
