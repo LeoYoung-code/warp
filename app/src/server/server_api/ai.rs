@@ -1,4 +1,4 @@
-// OpenWarp(本地化,Wave 2-2):`AIClient` trait 的全部 38 个方法已本地化为 stub。
+// OpenWarp(本地化,Wave 2-2):`AIClient` trait 的云端方法已本地化为 stub。
 // 历史职责:通过 warp.dev 后端的 GraphQL/HTTP RPC 完成 AI 对话、命令生成、
 // ambient agent 远程调度、conversation 同步、artifact 上传/下载、orchestration v2 消息等。
 // BYOP(Bring-Your-Own-Provider)链路完全不经过 `AIClient` trait —— 走
@@ -31,8 +31,8 @@ use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 
 // Re-export ambient agent types for backwards compatibility
 pub use crate::ai::ambient_agents::{
-    task::{AttachmentInput, TaskAttachment},
-    AgentConfigSnapshot, AgentSource, AmbientAgentTask, AmbientAgentTaskState, TaskStatusMessage,
+    task::AttachmentInput, AgentConfigSnapshot, AgentSource, AmbientAgentTask,
+    AmbientAgentTaskState, TaskStatusMessage,
 };
 
 /// A status update for a task, optionally including a platform error code.
@@ -149,213 +149,6 @@ pub struct SpawnAgentResponse {
     pub run_id: String,
     #[serde(default)]
     pub at_capacity: bool,
-}
-
-/// Response from the artifact endpoint.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "artifact_type")]
-pub enum ArtifactDownloadResponse {
-    #[serde(rename = "SCREENSHOT")]
-    Screenshot {
-        #[serde(flatten)]
-        common: ArtifactDownloadCommonFields,
-        data: ScreenshotArtifactResponseData,
-    },
-    #[serde(rename = "FILE")]
-    File {
-        #[serde(flatten)]
-        common: ArtifactDownloadCommonFields,
-        data: FileArtifactResponseData,
-    },
-}
-
-impl ArtifactDownloadResponse {
-    fn common(&self) -> &ArtifactDownloadCommonFields {
-        match self {
-            ArtifactDownloadResponse::Screenshot { common, .. }
-            | ArtifactDownloadResponse::File { common, .. } => common,
-        }
-    }
-
-    pub fn artifact_uid(&self) -> &str {
-        &self.common().artifact_uid
-    }
-
-    pub fn artifact_type(&self) -> &'static str {
-        match self {
-            ArtifactDownloadResponse::Screenshot { .. } => "SCREENSHOT",
-            ArtifactDownloadResponse::File { .. } => "FILE",
-        }
-    }
-
-    pub fn created_at(&self) -> DateTime<Utc> {
-        self.common().created_at
-    }
-
-    pub fn download_url(&self) -> &str {
-        match self {
-            ArtifactDownloadResponse::Screenshot { data, .. } => &data.download_url,
-            ArtifactDownloadResponse::File { data, .. } => &data.download_url,
-        }
-    }
-
-    pub fn expires_at(&self) -> DateTime<Utc> {
-        match self {
-            ArtifactDownloadResponse::Screenshot { data, .. } => data.expires_at,
-            ArtifactDownloadResponse::File { data, .. } => data.expires_at,
-        }
-    }
-
-    pub fn content_type(&self) -> &str {
-        match self {
-            ArtifactDownloadResponse::Screenshot { data, .. } => &data.content_type,
-            ArtifactDownloadResponse::File { data, .. } => &data.content_type,
-        }
-    }
-
-    pub fn filepath(&self) -> Option<&str> {
-        match self {
-            ArtifactDownloadResponse::Screenshot { .. } => None,
-            ArtifactDownloadResponse::File { data, .. } => Some(&data.filepath),
-        }
-    }
-
-    pub fn filename(&self) -> Option<&str> {
-        match self {
-            ArtifactDownloadResponse::Screenshot { .. } => None,
-            ArtifactDownloadResponse::File { data, .. } => Some(&data.filename),
-        }
-    }
-
-    pub fn description(&self) -> Option<&str> {
-        match self {
-            ArtifactDownloadResponse::Screenshot { data, .. } => data.description.as_deref(),
-            ArtifactDownloadResponse::File { data, .. } => data.description.as_deref(),
-        }
-    }
-
-    pub fn size_bytes(&self) -> Option<i64> {
-        match self {
-            ArtifactDownloadResponse::Screenshot { .. } => None,
-            ArtifactDownloadResponse::File { data, .. } => data.size_bytes,
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct ArtifactDownloadCommonFields {
-    pub artifact_uid: String,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Screenshot-specific data from the artifact endpoint.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct ScreenshotArtifactResponseData {
-    pub download_url: String,
-    pub expires_at: DateTime<Utc>,
-    pub content_type: String,
-    pub description: Option<String>,
-}
-
-/// File-specific data from the artifact endpoint.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct FileArtifactResponseData {
-    pub download_url: String,
-    pub expires_at: DateTime<Utc>,
-    pub content_type: String,
-    pub filepath: String,
-    pub filename: String,
-    pub description: Option<String>,
-    pub size_bytes: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AttachmentFileInfo {
-    pub filename: String,
-    pub mime_type: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PrepareAttachmentUploadsRequest {
-    pub files: Vec<AttachmentFileInfo>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DownloadAttachmentsRequest {
-    pub attachment_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct AttachmentDownloadInfo {
-    pub attachment_id: String,
-    pub download_url: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DownloadAttachmentsResponse {
-    pub attachments: Vec<AttachmentDownloadInfo>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct HandoffSnapshotAttachmentInfo {
-    pub attachment_id: String,
-    pub filename: String,
-    pub download_url: String,
-    pub mime_type: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ListHandoffSnapshotAttachmentsResponse {
-    pub attachments: Vec<HandoffSnapshotAttachmentInfo>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct AttachmentUploadInfo {
-    pub attachment_id: String,
-    pub upload_url: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PrepareAttachmentUploadsResponse {
-    pub attachments: Vec<AttachmentUploadInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateFileArtifactUploadRequest {
-    pub conversation_id: Option<String>,
-    pub run_id: Option<String>,
-    pub filepath: String,
-    pub description: Option<String>,
-    pub mime_type: Option<String>,
-    pub size_bytes: Option<i32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileArtifactRecord {
-    pub artifact_uid: String,
-    pub filepath: String,
-    pub description: Option<String>,
-    pub mime_type: String,
-    pub size_bytes: Option<i32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileArtifactUploadHeaderInfo {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileArtifactUploadTargetInfo {
-    pub url: String,
-    pub method: String,
-    pub headers: Vec<FileArtifactUploadHeaderInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateFileArtifactUploadResponse {
-    pub artifact: FileArtifactRecord,
-    pub upload_target: FileArtifactUploadTargetInfo,
 }
 
 /// Filter parameters for listing ambient agent tasks.
@@ -672,44 +465,6 @@ pub trait AIClient: 'static + Send + Sync {
         task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<(), anyhow::Error>;
 
-    async fn get_task_attachments(
-        &self,
-        task_id: String,
-    ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error>;
-
-    async fn create_file_artifact_upload_target(
-        &self,
-        request: CreateFileArtifactUploadRequest,
-    ) -> anyhow::Result<CreateFileArtifactUploadResponse, anyhow::Error>;
-
-    async fn confirm_file_artifact_upload(
-        &self,
-        artifact_uid: String,
-        checksum: String,
-    ) -> anyhow::Result<FileArtifactRecord, anyhow::Error>;
-
-    async fn get_artifact_download(
-        &self,
-        artifact_uid: &str,
-    ) -> anyhow::Result<ArtifactDownloadResponse, anyhow::Error>;
-
-    async fn prepare_attachments_for_upload(
-        &self,
-        task_id: &AmbientAgentTaskId,
-        files: &[AttachmentFileInfo],
-    ) -> anyhow::Result<PrepareAttachmentUploadsResponse, anyhow::Error>;
-
-    async fn download_task_attachments(
-        &self,
-        task_id: &AmbientAgentTaskId,
-        attachment_ids: &[String],
-    ) -> anyhow::Result<DownloadAttachmentsResponse, anyhow::Error>;
-
-    async fn get_handoff_snapshot_attachments(
-        &self,
-        task_id: &AmbientAgentTaskId,
-    ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error>;
-
     // --- Orchestrations V2 messaging ---
 
     async fn send_agent_message(
@@ -834,62 +589,6 @@ impl AIClient for LocalAIClient {
         _task_id: &AmbientAgentTaskId,
     ) -> anyhow::Result<(), anyhow::Error> {
         Err(disabled_ai_client_method("cancel_ambient_agent_task"))
-    }
-
-    async fn get_task_attachments(
-        &self,
-        _task_id: String,
-    ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error> {
-        Err(disabled_ai_client_method("get_task_attachments"))
-    }
-
-    async fn create_file_artifact_upload_target(
-        &self,
-        _request: CreateFileArtifactUploadRequest,
-    ) -> anyhow::Result<CreateFileArtifactUploadResponse, anyhow::Error> {
-        Err(disabled_ai_client_method(
-            "create_file_artifact_upload_target",
-        ))
-    }
-
-    async fn confirm_file_artifact_upload(
-        &self,
-        _artifact_uid: String,
-        _checksum: String,
-    ) -> anyhow::Result<FileArtifactRecord, anyhow::Error> {
-        Err(disabled_ai_client_method("confirm_file_artifact_upload"))
-    }
-
-    async fn get_artifact_download(
-        &self,
-        _artifact_uid: &str,
-    ) -> anyhow::Result<ArtifactDownloadResponse, anyhow::Error> {
-        Err(disabled_ai_client_method("get_artifact_download"))
-    }
-
-    async fn prepare_attachments_for_upload(
-        &self,
-        _task_id: &AmbientAgentTaskId,
-        _files: &[AttachmentFileInfo],
-    ) -> anyhow::Result<PrepareAttachmentUploadsResponse, anyhow::Error> {
-        Err(disabled_ai_client_method("prepare_attachments_for_upload"))
-    }
-
-    async fn download_task_attachments(
-        &self,
-        _task_id: &AmbientAgentTaskId,
-        _attachment_ids: &[String],
-    ) -> anyhow::Result<DownloadAttachmentsResponse, anyhow::Error> {
-        Err(disabled_ai_client_method("download_task_attachments"))
-    }
-
-    async fn get_handoff_snapshot_attachments(
-        &self,
-        _task_id: &AmbientAgentTaskId,
-    ) -> anyhow::Result<Vec<TaskAttachment>, anyhow::Error> {
-        Err(disabled_ai_client_method(
-            "get_handoff_snapshot_attachments",
-        ))
     }
 
     async fn send_agent_message(
