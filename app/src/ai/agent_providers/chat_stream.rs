@@ -57,8 +57,8 @@ use genai::{Client, ModelIden, ServiceTarget, WebConfig};
 
 use crate::ai::agent::api::{RequestParams, ResponseStream};
 use crate::ai::agent::{AIAgentInput, RunningCommand, UserQueryMode};
+use crate::ai::api_error::AIApiError;
 use crate::ai::byop_compaction;
-use crate::server::server_api::AIApiError;
 use crate::settings::AgentProviderApiType;
 use ai::agent::convert::ConvertToAPITypeError;
 
@@ -2924,7 +2924,7 @@ pub async fn generate_byop_output(
 /// 用独立 BYOP 配置发一个短的非工具请求,让模型对首条 user query 生成会话标题。
 /// 所有错误吞掉(返回 Err 让上游打 warn log,不影响主流程)。
 ///
-/// 实现委托给 `oneshot::byop_oneshot_completion`,这里只负责拼 prompt 和清洗输出。
+/// 实现委托给 `oneshot::byop_oneshot_streaming_completion`,这里只负责拼 prompt 和清洗输出。
 ///
 /// ## prompt 设计
 ///
@@ -2952,7 +2952,7 @@ pub(crate) async fn generate_title_via_byop(
     );
     let opts = super::oneshot::OneshotOptions {
         max_chars: Some(1000),
-        temperature: Some(0.3),
+        temperature: Some(0.5),
         ..Default::default()
     };
     let raw = super::oneshot::byop_oneshot_completion(&cfg, system, &user_prompt, &opts).await?;
@@ -3167,11 +3167,8 @@ fn make_append_event(task_id: &str, message_id: &str, kind: AppendKind) -> api::
 /// 让模型看到标准 tool_result。
 async fn dispatch_byop_web_tool(tool_name: &str, args_str: &str) -> Value {
     use tools::web_runtime;
-    // 短超时 + 默认安全配置;系统全局共享一个 client 也可,这里每次新建以避免污染。
-    let client = match reqwest::Client::builder()
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    // 为 webfetch 构建带 SSRF 防护的 client：自定义重定向策略会校验每一跳目标。
+    let client = match web_runtime::build_ssrf_safe_client() {
         Ok(c) => c,
         Err(e) => {
             log::warn!("[byop] reqwest client build failed: {e:#}");
