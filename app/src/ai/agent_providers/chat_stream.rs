@@ -1495,7 +1495,9 @@ fn sanitize_tool_call_pairs(messages: &mut Vec<ChatMessage>) {
             // 原位置只在首次见到该 call_id 时记录;若同 call_id 多次出现
             // (持久化重复),保留最早出现的位置 — 该位置最能代表"上轮请求里它
             // 落在哪里",用于判定跨位置重排。
-            original_positions.entry(resp.call_id.clone()).or_insert(idx);
+            original_positions
+                .entry(resp.call_id.clone())
+                .or_insert(idx);
         }
     }
 
@@ -1530,20 +1532,18 @@ fn sanitize_tool_call_pairs(messages: &mut Vec<ChatMessage>) {
         let expected_tool_idx = orig_idx + 1;
         let bundled: Vec<ToolResponse> = expected_call_ids
             .iter()
-            .map(|cid| {
-                match responses_by_call_id.remove(cid) {
-                    Some(resp) => {
-                        if let Some(orig_pos) = original_positions.get(cid) {
-                            if *orig_pos != expected_tool_idx {
-                                reordered_call_ids.push(cid.clone());
-                            }
+            .map(|cid| match responses_by_call_id.remove(cid) {
+                Some(resp) => {
+                    if let Some(orig_pos) = original_positions.get(cid) {
+                        if *orig_pos != expected_tool_idx {
+                            reordered_call_ids.push(cid.clone());
                         }
-                        resp
                     }
-                    None => {
-                        placeholders_inserted.push(cid.clone());
-                        ToolResponse::new(cid.clone(), "(tool 执行结果未保留)".to_owned())
-                    }
+                    resp
+                }
+                None => {
+                    placeholders_inserted.push(cid.clone());
+                    ToolResponse::new(cid.clone(), "(tool 执行结果未保留)".to_owned())
                 }
             })
             .collect();
