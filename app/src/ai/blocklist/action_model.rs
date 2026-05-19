@@ -583,10 +583,12 @@ impl BlocklistAIActionModel {
         &self,
         conversation_id: AIConversationId,
         task_id: &str,
-        action_id: &str,
+        tool_call_id: &str,
         app: &AppContext,
     ) -> bool {
-        let action_id = crate::ai::agent::AIAgentActionId::from(action_id.to_owned());
+        // 在 action model 里 `AIAgentActionId` 即 tool_call_id,这里只是把入参显式重命名,
+        // 让调用点(controller 的 byop preflight)读起来更直观。
+        let action_id = crate::ai::agent::AIAgentActionId::from(tool_call_id.to_owned());
         let has_pending = self
             .pending_actions
             .get(&conversation_id)

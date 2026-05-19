@@ -2948,7 +2948,9 @@ impl AIConversation {
         &self,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
     ) -> Result<(), UpdateConversationError> {
-        self.ensure_can_persist_byop_preflight_state(ctx)?;
+        // 调用方(`append_byop_preflight_messages_to_task`)在写入前已经调用过
+        // `ensure_can_persist_byop_preflight_state`,此处不再重复校验 sender 是否存在;
+        // 只关心 try_send 自身的 Full/Closed 错误,沿用现有的 ByopPreflightPersistenceSend。
         let sqlite_sender = GlobalResourceHandlesProvider::as_ref(ctx)
             .get()
             .model_event_sender

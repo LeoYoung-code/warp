@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 pub const REPAIR_STATE_VERSION: u32 = 1;
 pub const BLOCKED_BYOP_REQUEST_MESSAGE: &str =
-    "OpenWarp did not send the BYOP request because a previous tool call is missing its recorded result.";
+    "Can't continue this conversation: an earlier tool result is missing or corrupted in this conversation's history, so OpenWarp can't safely send the request to your provider. Start a new conversation or fork from an earlier point to continue.";
 pub const PENDING_BYOP_TOOL_RESULTS_MESSAGE: &str =
-    "OpenWarp is waiting for previous BYOP tool results before sending the next request.";
+    "Waiting for a running tool to finish before sending your next request.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReadinessTriggerLayer {
@@ -369,7 +369,14 @@ impl ProjectionItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepairSource {
+    /// 用户通过 fork(/fork、rewind)从 source conversation 派生新 conversation 时,
+    /// 由 `byop_fork_repair_state_json` 为被丢弃的 tool result 记录的修复来源。
     ForkedHistory,
+    /// 旧版客户端写入但当前协议无法回放的 tool result 缺口在恢复时记录的修复来源。
+    /// 见 `specs/byop-placeholder-tool-results/ISSUES.md` BYOP-PR-6:目前未在恢复路径中产生此 variant,
+    /// 老 BYOP conversation 中无法解释的缺口默认按 corrupted history 阻断处理。
+    /// **不要随意删除该 variant**:持久化 sidecar 中可能反序列化出 `restored_legacy_history`,
+    /// 删除会破坏 Sidecar 格式兼容性。
     RestoredLegacyHistory,
 }
 
@@ -684,21 +691,21 @@ impl ReadinessDiagnosticCoalescer {
             if suppressed_count == 0 {
                 continue;
             }
+            let trigger_layer = key.trigger_layer.as_str();
+            let request_attempt_id = context.request_attempt_id;
             entries.push(ReadinessDiagnosticLogEntry {
                 level,
                 message: format!(
-                    "[byop-readiness] diagnostic coalesced suppressed_count={} \
+                    "[byop-readiness] diagnostic coalesced suppressed_count={suppressed_count} \
                      category={:?} conversation_id={} task_id={} \
                      assistant_tool_call_message_id={} tool_call_id={} \
-                     redacted_tool_kind=omitted trigger_layer={} request_attempt_id={}",
-                    suppressed_count,
+                     redacted_tool_kind=omitted trigger_layer={trigger_layer} \
+                     request_attempt_id={request_attempt_id}",
                     key.category,
                     key.conversation_id,
                     key.task_id,
                     key.assistant_tool_call_message_id,
                     key.tool_call_id,
-                    key.trigger_layer.as_str(),
-                    context.request_attempt_id
                 ),
             });
         }
@@ -733,24 +740,24 @@ impl ReadinessDiagnosticCoalescer {
                 }
             }
 
+            let trigger_layer = context.trigger_layer.as_str();
+            let iteration = context
+                .iteration
+                .map(|iteration| iteration.to_string())
+                .unwrap_or_else(|| "none".to_owned());
+            let request_attempt_id = context.request_attempt_id;
             entries.push(ReadinessDiagnosticLogEntry {
                 level,
                 message: format!(
                     "[byop-readiness] diagnostic category={category:?} conversation_id={} \
                      task_id={} assistant_tool_call_message_id={} tool_call_id={} \
-                     redacted_tool_kind={} trigger_layer={} request_attempt_id={} \
-                     iteration={}",
+                     redacted_tool_kind={} trigger_layer={trigger_layer} \
+                     request_attempt_id={request_attempt_id} iteration={iteration}",
                     context.conversation_id,
                     target.task_id,
                     target.assistant_tool_call_message_id,
                     target.tool_call_id,
                     target.redacted_tool_kind,
-                    context.trigger_layer.as_str(),
-                    context.request_attempt_id,
-                    context
-                        .iteration
-                        .map(|iteration| iteration.to_string())
-                        .unwrap_or_else(|| "none".to_owned())
                 ),
             });
         }
@@ -841,27 +848,19 @@ impl ReadinessState {
     pub fn category(&self) -> ReadinessCategory {
         match self {
             ReadinessState::Ready => ReadinessCategory::Ready,
-            ReadinessState::AcceptedHistoryRepair { repairs: _ } => {
+            ReadinessState::AcceptedHistoryRepair { .. } => {
                 ReadinessCategory::AcceptedHistoryRepair
             }
-            ReadinessState::PendingToolResults { tool_calls: _ } => {
-                ReadinessCategory::PendingToolResults
-            }
-            ReadinessState::NeedsCancellationCommit { tool_calls: _ } => {
+            ReadinessState::PendingToolResults { .. } => ReadinessCategory::PendingToolResults,
+            ReadinessState::NeedsCancellationCommit { .. } => {
                 ReadinessCategory::NeedsCancellationCommit
             }
-            ReadinessState::DuplicateToolResults {
-                tool_call: _,
-                results: _,
-            } => ReadinessCategory::DuplicateToolResults,
-            ReadinessState::OrphanToolResult { result: _ } => ReadinessCategory::OrphanToolResult,
-            ReadinessState::OutOfOrderToolResult { result: _ } => {
-                ReadinessCategory::OutOfOrderToolResult
+            ReadinessState::DuplicateToolResults { .. } => ReadinessCategory::DuplicateToolResults,
+            ReadinessState::OrphanToolResult { .. } => ReadinessCategory::OrphanToolResult,
+            ReadinessState::OutOfOrderToolResult { .. } => ReadinessCategory::OutOfOrderToolResult,
+            ReadinessState::MissingResultWithoutRepairSource { .. } => {
+                ReadinessCategory::MissingResultWithoutRepairSource
             }
-            ReadinessState::MissingResultWithoutRepairSource {
-                tool_calls: _,
-                reason: _,
-            } => ReadinessCategory::MissingResultWithoutRepairSource,
         }
     }
 }
@@ -1086,26 +1085,21 @@ impl<'a> Classifier<'a> {
     }
 
     fn handle_tool_result(&mut self, result: ProjectedToolResult) -> Option<ReadinessState> {
-        if self.active_group.is_none() {
-            return Some(self.unattached_result_state(result));
+        // 把"是否归属当前 active group"的判断与"修改 active_call 状态"分成两步,
+        // 先通过不可变借用筛选,失败则直接走 unattached 路径,
+        // 通过后再获取可变借用,避免 expect/unwrap 出现在生产路径上。
+        match self.active_group.as_ref() {
+            Some(active_group)
+                if result.task_id == active_group.task_id
+                    && result.assistant_tool_call_message_id.as_deref()
+                        == Some(active_group.assistant_message_id.as_str()) => {}
+            _ => return Some(self.unattached_result_state(result)),
         }
 
-        let active_group = self
-            .active_group
-            .as_mut()
-            .expect("active group checked above");
-        if result.task_id != active_group.task_id {
-            return Some(self.unattached_result_state(result));
-        }
-
-        if let Some(assistant_message_id) = &result.assistant_tool_call_message_id {
-            if assistant_message_id != &active_group.assistant_message_id {
-                return Some(self.unattached_result_state(result));
-            }
-        } else {
-            return Some(self.unattached_result_state(result));
-        }
-
+        let active_group = match self.active_group.as_mut() {
+            Some(active_group) => active_group,
+            None => return Some(self.unattached_result_state(result)),
+        };
         let Some(active_call) = active_group.matching_call_mut(&result) else {
             return Some(self.unattached_result_state(result));
         };
@@ -1230,6 +1224,10 @@ impl<'a> Classifier<'a> {
     }
 
     fn mark_stale_repair_records_for_visible_gap(&mut self, key: &ToolCallKey) {
+        // Repair record 的授权语义要求 task_id + assistant_tool_call_message_id + tool_call_id
+        // 三字段完全相等;但当出现真实可见 gap(即同 `tool_call_id` 已被当前对话历史明确标记缺失)时,
+        // 任何"同 tool_call_id 但来自其他 (task_id, assistant_message_id)"的 repair record 都不再适用,
+        // 标记为 stale 以便上层在 diagnostics 中提示该 record 已被忽略。
         for (index, record) in self.context.repair_records.iter().enumerate() {
             if record.key.tool_call_id == key.tool_call_id && record.key != *key {
                 self.stale_repair_indices.insert(index);

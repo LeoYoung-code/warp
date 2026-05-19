@@ -216,7 +216,11 @@ struct RequestConversationSnapshot {
     agent_name: Option<String>,
 }
 
-const BYOP_PREFLIGHT_MAX_ITERATIONS: usize = 3;
+/// preflight 在每轮迭代里只修复"一种类型"的问题(已持久化结果回收 / 当前输入结果 / finished
+/// results / cancellation result),正常一轮请求最多涉及 2~3 种,但极端并发或一次累积多 task 的
+/// 结果时需要更多轮才能收敛。这里保留较小的上界以便在真正的死循环时尽早返回 blocked,而不是
+/// 静默自旋。
+const BYOP_PREFLIGHT_MAX_ITERATIONS: usize = 6;
 
 impl RequestInput {
     fn for_task(
@@ -378,6 +382,21 @@ pub struct BlocklistAIController {
             Option<PassiveSuggestionTrigger>,
         )>,
     >,
+    /// BYOP 请求因 readiness 报 PendingToolResults 被暂存的 RequestInput,
+    /// 等同 conversation 的 live action 完成、触发 FinishedAction 后由
+    /// `flush_pending_byop_request_after_finished_action` 取出并重发,
+    /// 避免用户提交的 prompt 被静默丢弃。
+    /// 每个 conversation 最多保留 1 条;用户后续直接提交新请求会覆盖。
+    pending_byop_requests: HashMap<AIConversationId, PendingByopRequest>,
+}
+
+/// 见 `pending_byop_requests`。
+struct PendingByopRequest {
+    request_input: RequestInput,
+    query_metadata: Option<RequestMetadata>,
+    default_to_follow_up_on_success: bool,
+    can_attempt_resume_on_error: bool,
+    is_queued_prompt: bool,
 }
 
 enum InputQueryType {
@@ -545,6 +564,11 @@ impl BlocklistAIController {
             } else {
                 FollowUpTrigger::Auto
             };
+            // 优先重发被 readiness 暂存的 BYOP 请求(其中含用户的原始 prompt);
+            // 没有则走原 follow-up 路径(只发 finished_action_results)。
+            if me.flush_pending_byop_request_after_finished_action(*conversation_id, ctx) {
+                return;
+            }
             me.send_follow_up_for_conversation(*conversation_id, trigger, ctx);
         });
 
@@ -597,6 +621,7 @@ impl BlocklistAIController {
             pending_auto_resume_handles: HashMap::new(),
             pending_passive_follow_ups: HashSet::new(),
             pending_passive_suggestion_results: HashMap::new(),
+            pending_byop_requests: HashMap::new(),
         }
     }
 
@@ -1486,6 +1511,73 @@ impl BlocklistAIController {
         self.pending_passive_follow_ups.remove(&conversation_id);
     }
 
+    /// 当 conversation 的 live action 完成时,如果该 conversation 之前有 BYOP 请求因
+    /// readiness 报 PendingToolResults 被暂存,优先重发该请求(以便用户的原始 prompt 不被丢失),
+    /// 并把 action 完成产出的 finished_action_results 合入同一个 RequestInput,避免发出两次请求。
+    /// 返回 true 表示已消费 pending 请求并尝试发送;false 表示没有 pending 请求需要 flush。
+    fn flush_pending_byop_request_after_finished_action(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let Some(pending) = self.pending_byop_requests.remove(&conversation_id) else {
+            return false;
+        };
+        let PendingByopRequest {
+            mut request_input,
+            query_metadata,
+            default_to_follow_up_on_success,
+            can_attempt_resume_on_error,
+            is_queued_prompt,
+        } = pending;
+
+        let finished_results = self.action_model.update(ctx, |action_model, _| {
+            action_model.drain_finished_action_results(conversation_id)
+        });
+        if !finished_results.is_empty() {
+            let context = input_context_for_request(
+                false,
+                self.context_model.as_ref(ctx),
+                self.active_session.as_ref(ctx),
+                Some(conversation_id),
+                vec![],
+                ctx,
+            );
+            for result in finished_results {
+                request_input
+                    .input_messages
+                    .entry(result.task_id.clone())
+                    .or_default()
+                    .push(AIAgentInput::ActionResult {
+                        result,
+                        context: context.clone(),
+                    });
+            }
+        }
+
+        log::debug!(
+            "[byop-readiness] flushing pending BYOP request after finished action \
+             conversation_id={conversation_id:?}"
+        );
+        if let Err(e) = self.send_request_input(
+            request_input,
+            query_metadata,
+            default_to_follow_up_on_success,
+            can_attempt_resume_on_error,
+            is_queued_prompt,
+            ctx,
+        ) {
+            // 二次失败时不再循环排队:若仍报 Pending,Err 已被 send_request_input 内部重新
+            // 写入 pending_byop_requests;若是其它错误则按 controller 已有路径处理。
+            if e.downcast_ref::<PendingByopToolResultsError>().is_none() {
+                log::error!(
+                    "[byop-readiness] failed to flush pending BYOP request: {e:?}"
+                );
+            }
+        }
+        true
+    }
+
     pub fn resume_conversation(
         &mut self,
         conversation_id: AIConversationId,
@@ -2094,7 +2186,14 @@ impl BlocklistAIController {
                     diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Debug);
                     return Err(PendingByopToolResultsError::new(tool_calls.len()).into());
                 }
-                state => {
+                state @ (crate::ai::byop_readiness::ReadinessState::DuplicateToolResults {
+                    ..
+                }
+                | crate::ai::byop_readiness::ReadinessState::OrphanToolResult { .. }
+                | crate::ai::byop_readiness::ReadinessState::OutOfOrderToolResult { .. }
+                | crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                    ..
+                }) => {
                     let category = state.category();
                     let diagnostic_context = ReadinessDiagnosticContext::new(
                         &conversation_id_for_log,
@@ -2351,19 +2450,40 @@ impl BlocklistAIController {
         tool_calls: &[crate::ai::byop_readiness::ToolCallRef],
         ctx: &mut ModelContext<Self>,
     ) -> anyhow::Result<usize> {
-        let wanted = tool_calls
-            .iter()
-            .map(|tool_call| {
-                (
+        // `ToolCallKey` 是三元组(task_id + assistant_tool_call_message_id + tool_call_id),
+        // 但 BYOP `AIAgentActionResult` 与持久化的 `ToolCallResult` 协议层只携带 (task_id, tool_call_id),
+        // 没有显式的 assistant_tool_call_message_id 反向引用。为了对齐 readiness 模块的 ToolCallKey
+        // 语义,这里用 (task_id, tool_call_id) 作为外层匹配键,同时记录 readiness 期望的
+        // assistant_tool_call_message_id 集合;在协议假设(同 conversation 内 tool_call_id 唯一)
+        // 被打破时只记 warn 而不阻断,避免因边界场景导致用户流程卡死。
+        let mut wanted: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for tool_call in tool_calls {
+            wanted
+                .entry((
                     tool_call.key.task_id.clone(),
                     tool_call.key.tool_call_id.clone(),
-                )
-            })
-            .collect::<HashSet<_>>();
+                ))
+                .or_default()
+                .insert(tool_call.key.assistant_tool_call_message_id.clone());
+        }
+        for ((task_id, tool_call_id), assistant_message_ids) in &wanted {
+            if assistant_message_ids.len() > 1 {
+                log::warn!(
+                    "[byop-readiness] commit_byop_cancellation_results saw duplicate tool_call_id \
+                     across multiple assistant messages task_id={task_id} \
+                     tool_call_id={tool_call_id} assistant_message_id_count={}",
+                    assistant_message_ids.len()
+                );
+            }
+        }
         let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
         let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
             HashMap::new();
         let mut keys_to_remove = HashSet::new();
+        // 已经被持久化过的 cancellation result 也算"有进展",
+        // 否则当 readiness 仍报 NeedsCancellationCommit 但 request_input 中已无对应 entry 时,
+        // 会被错误判定为零进展而阻断;实际上下一轮 readiness 会自然 converge。
+        let mut already_persisted = 0usize;
 
         for input in request_input.all_inputs() {
             let AIAgentInput::ActionResult { result, .. } = input else {
@@ -2376,12 +2496,13 @@ impl BlocklistAIController {
             let task_id = result.task_id.to_string();
             let tool_call_id = result.id.to_string();
             let key = (task_id.clone(), tool_call_id.clone());
-            if !wanted.contains(&key) {
+            if !wanted.contains_key(&key) {
                 continue;
             }
 
             keys_to_remove.insert(key.clone());
             if self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
+                already_persisted += 1;
                 continue;
             }
 
@@ -2405,7 +2526,7 @@ impl BlocklistAIController {
         }
 
         let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
-        Ok(appended + removed)
+        Ok(appended + removed + already_persisted)
     }
 
     fn has_persisted_tool_result(
@@ -2415,17 +2536,21 @@ impl BlocklistAIController {
         tool_call_id: &str,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
-        let task_id = TaskId::new(task_id.to_owned());
+        // 持久化 protobuf `ToolCallResult` 协议只携带 `tool_call_id`,没有 assistant_message_id 反向引用,
+        // 因此最严格的匹配只能做到 (task_id, tool_call_id) 二元组。外层 `get_task(&task_id)` 已经
+        // 把搜索范围隔离到目标 task,这里再额外校验一次 `msg.task_id`,以防未来调用方拿到非隔离视图。
+        let task_id_owned = TaskId::new(task_id.to_owned());
         BlocklistAIHistoryModel::as_ref(ctx)
             .conversation(&conversation_id)
-            .and_then(|conversation| conversation.get_task(&task_id))
+            .and_then(|conversation| conversation.get_task(&task_id_owned))
             .is_some_and(|task| {
                 task.messages().any(|msg| {
-                    matches!(
-                        msg.message.as_ref(),
-                        Some(message::Message::ToolCallResult(result))
-                            if result.tool_call_id == tool_call_id
-                    )
+                    msg.task_id == task_id
+                        && matches!(
+                            msg.message.as_ref(),
+                            Some(message::Message::ToolCallResult(result))
+                                if result.tool_call_id == tool_call_id
+                        )
                 })
             })
     }
@@ -2476,6 +2601,7 @@ impl BlocklistAIController {
         conversation_id: AIConversationId,
         model_id: LLMId,
         is_queued_prompt: bool,
+        error_message: String,
         ctx: &mut ModelContext<Self>,
     ) -> anyhow::Result<(AIConversationId, ResponseStreamId)> {
         let response_stream_id = ResponseStreamId::new_local();
@@ -2519,7 +2645,7 @@ impl BlocklistAIController {
         BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
             history_model.mark_response_stream_completed_with_error(
                 RenderableAIError::Other {
-                    error_message: BLOCKED_BYOP_REQUEST_MESSAGE.to_owned(),
+                    error_message,
                     will_attempt_resume: false,
                     waiting_for_network: false,
                 },
@@ -2597,6 +2723,9 @@ impl BlocklistAIController {
         {
             handle.abort();
         }
+        // 新一轮请求开始,先丢掉之前因 readiness Pending 暂存的旧请求;
+        // 如果本次 preflight 又遇到 PendingToolResults,下面会重新写回。
+        self.pending_byop_requests.remove(&conversation_id);
 
         // Make sure there's no existing response stream for the conversation. If
         // there is, something has gone wrong.
@@ -2640,13 +2769,14 @@ impl BlocklistAIController {
             request_snapshot.agent_name,
             ctx,
         );
-        if let Err(error) = self.run_byop_request_preflight(
+        let preflight_result = self.run_byop_request_preflight(
             &mut request_input,
             &mut conversation_data,
             &mut request_params,
             query_metadata.clone(),
             ctx,
-        ) {
+        );
+        if let Err(error) = preflight_result {
             if let Some(pending) = error.downcast_ref::<PendingByopToolResultsError>() {
                 log::debug!(
                     "[byop-readiness] BYOP request not opened; waiting for pending tool \
@@ -2659,6 +2789,18 @@ impl BlocklistAIController {
                         .byop_readiness_attempt_id
                         .as_deref()
                         .unwrap_or("unknown")
+                );
+                // 把用户的输入暂存,等 conversation 内的 live action 完成、触发 FinishedAction
+                // 后,在 `flush_pending_byop_request_after_finished_action` 中重发,避免静默丢失。
+                self.pending_byop_requests.insert(
+                    conversation_id,
+                    PendingByopRequest {
+                        request_input,
+                        query_metadata,
+                        default_to_follow_up_on_success,
+                        can_attempt_resume_on_error,
+                        is_queued_prompt,
+                    },
                 );
                 return Err(error);
             }
@@ -2678,8 +2820,42 @@ impl BlocklistAIController {
                     conversation_data.id,
                     request_params.model.clone(),
                     is_queued_prompt,
+                    BLOCKED_BYOP_REQUEST_MESSAGE.to_owned(),
                     ctx,
                 );
+            }
+            // 持久化路径失败(shared session 不可保存、settings 关闭持久化、SQLite sender 不可用
+            // 或 channel 满)时,原本会作为通用 anyhow::Error 冒泡到调用方被 log::error! 静默吞掉,
+            // 用户看不到任何反馈。这里把它也走 blocked request UI 路径,让用户能看到失败原因。
+            if let Some(persistence_err) =
+                error.downcast_ref::<crate::ai::agent::conversation::UpdateConversationError>()
+            {
+                if matches!(
+                    persistence_err,
+                    crate::ai::agent::conversation::UpdateConversationError::ByopPreflightPersistenceUnavailable(_)
+                    | crate::ai::agent::conversation::UpdateConversationError::ByopPreflightPersistenceSend(_)
+                ) {
+                    log::error!(
+                        "[byop-readiness] rendering blocked request due to persistence failure: \
+                         {persistence_err:?} conversation_id={} request_attempt_id={}",
+                        conversation_data.id,
+                        request_params
+                            .byop_readiness_attempt_id
+                            .as_deref()
+                            .unwrap_or("unknown")
+                    );
+                    return self.complete_byop_blocked_request(
+                        request_input,
+                        conversation_data.id,
+                        request_params.model.clone(),
+                        is_queued_prompt,
+                        "OpenWarp couldn't save the BYOP conversation state needed to send this \
+                         request. Check that conversation persistence is enabled and that there \
+                         is enough disk space, then try again."
+                            .to_owned(),
+                        ctx,
+                    );
+                }
             }
             return Err(error);
         }

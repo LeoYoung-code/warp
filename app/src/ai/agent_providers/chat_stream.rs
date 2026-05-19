@@ -1094,18 +1094,12 @@ fn validate_serializer_readiness_projection_with_repair_state(
             log_accepted_history_repair(repairs, diagnostic_context);
             Ok(report)
         }
-        ReadinessState::PendingToolResults { tool_calls: _ }
-        | ReadinessState::NeedsCancellationCommit { tool_calls: _ }
-        | ReadinessState::DuplicateToolResults {
-            tool_call: _,
-            results: _,
-        }
-        | ReadinessState::OrphanToolResult { result: _ }
-        | ReadinessState::OutOfOrderToolResult { result: _ }
-        | ReadinessState::MissingResultWithoutRepairSource {
-            tool_calls: _,
-            reason: _,
-        } => {
+        ReadinessState::PendingToolResults { .. }
+        | ReadinessState::NeedsCancellationCommit { .. }
+        | ReadinessState::DuplicateToolResults { .. }
+        | ReadinessState::OrphanToolResult { .. }
+        | ReadinessState::OutOfOrderToolResult { .. }
+        | ReadinessState::MissingResultWithoutRepairSource { .. } => {
             let category = report.state.category();
             let mut diagnostics = ReadinessDiagnosticCoalescer::default();
             diagnostics.log_state(
@@ -1648,7 +1642,7 @@ fn build_chat_request(
             &mut messages,
             repairs,
             &outbound_tool_groups,
-        );
+        )?;
     }
 
     // 防御性 sanitize: 确保 messages 末尾不是 assistant。
@@ -2151,11 +2145,11 @@ fn repair_tool_call_pairs_for_accepted_history_gaps(
     messages: &mut Vec<ChatMessage>,
     repairs: &[AcceptedRepair],
     outbound_tool_groups: &[OutboundAssistantToolGroup],
-) {
+) -> Result<(), ConvertToAPITypeError> {
     use std::collections::{HashMap, HashSet};
 
     if repairs.is_empty() {
-        return;
+        return Ok(());
     }
 
     let repair_by_key: HashMap<ToolCallKey, &AcceptedRepair> = repairs
@@ -2292,12 +2286,21 @@ fn repair_tool_call_pairs_for_accepted_history_gaps(
         );
     }
     if !missing_without_repair.is_empty() {
+        // readiness classifier 已判定 AcceptedHistoryRepair 时,每个 missing tool call 都应
+        // 在 repairs 中有对应授权;若到这里仍 missing,说明 classifier 与 serializer 的
+        // tool call key 来源出现了不一致(例如未来重构 projection 或 outbound_tool_groups 构建逻辑
+        // 引入差异)。此时不能继续发出缺失 ToolResponse 的非法请求,必须阻断。
         log::error!(
             "[byop-diag] accepted_history_repair: readiness 未授权的缺失 ToolResponse: \
              missing_call_ids={:?}",
             missing_without_repair
         );
+        return Err(ConvertToAPITypeError::Other(
+            BlockedByopReadinessError::new(ReadinessCategory::MissingResultWithoutRepairSource)
+                .into(),
+        ));
     }
+    Ok(())
 }
 
 fn repair_placeholder_content(source: RepairSource) -> String {
@@ -6706,7 +6709,8 @@ mod accepted_history_repair_tests {
     fn repair_messages(messages: &mut Vec<ChatMessage>) {
         let groups = outbound_groups_for_messages(messages);
         let repairs = repairs_for_groups(&groups);
-        repair_tool_call_pairs_for_accepted_history_gaps(messages, &repairs, &groups);
+        repair_tool_call_pairs_for_accepted_history_gaps(messages, &repairs, &groups)
+            .expect("repair helper expects all gaps to be authorized in tests");
     }
 
     fn assert_structured_repair_payload(content: &str, reason: &str) {
@@ -6979,7 +6983,8 @@ mod accepted_history_repair_tests {
         ];
         let repairs = vec![accepted_repair(first_key, RepairSource::ForkedHistory)];
 
-        repair_tool_call_pairs_for_accepted_history_gaps(&mut msgs, &repairs, &groups);
+        repair_tool_call_pairs_for_accepted_history_gaps(&mut msgs, &repairs, &groups)
+            .expect("second_key has a real response, so repair must succeed");
 
         assert_eq!(msgs.len(), 6);
         assert_eq!(msgs[2].role, ChatRole::Tool);
