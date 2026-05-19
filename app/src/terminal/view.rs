@@ -56,6 +56,8 @@ use crate::ai::predict::prompt_suggestions::{
     is_accept_prompt_suggestion_bound_to_ctrl_enter,
 };
 use crate::search::slash_command_menu::static_commands::commands;
+use crate::ssh_manager::onekey::load_saved_ssh_credentials;
+use crate::ssh_manager::password_prompt::bytes_look_like_password_prompt;
 use crate::terminal::input::inline_menu::InlineMenuPositioner;
 use crate::terminal::view::passive_suggestions::PromptSuggestionResolution;
 pub use crate::terminal::view::rich_content::{
@@ -315,6 +317,7 @@ use crate::terminal::shared_session::protocol::{
     ParticipantId, Role, WindowSize as SessionSharingWindowSize,
 };
 use async_channel::{Receiver, Sender};
+use async_stream::stream;
 use chrono::{DateTime, Local, NaiveDateTime};
 use command_corrections::rules::{Rule, RuleId as CommandCorrectionsRuleId};
 use command_corrections::{correct_command, Command, Correction, HistoryItem, SessionMetadata};
@@ -648,6 +651,10 @@ const P10K_UPDATE_INSTRUCTIONS_URL: &str =
     "https://github.com/romkatv/powerlevel10k#how-do-i-update-powerlevel10k";
 
 const CONTEXT_MENU_WIDTH: f32 = 280.;
+const ONEKEY_CONTEXT_MENU_WIDTH: f32 = 320.;
+const ONEKEY_PROMPT_THROTTLE: Duration = Duration::from_secs(2);
+const ONEKEY_PROMPT_SLIDING_WINDOW_BYTES: usize = 8 * 1024;
+const ONEKEY_PROMPT_BUFFER_HARD_LIMIT: usize = 16 * 1024;
 
 /// The minimum amount of mouse-drag to consider a selection to
 /// be a text-selection as opposed to mouse-drag noise.
@@ -1784,6 +1791,13 @@ pub enum Event {
         target: FileTarget,
         line_col: Option<LineAndColumnArg>,
     },
+    /// OpenWarp:终端里 Ctrl/Cmd+点击远端 SSH 会话输出中的文件路径时发出。
+    /// 走 buffer-sync 协议在编辑器里打开远端文件,而不是本地 `OpenFileWithTarget`。
+    #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+    OpenRemoteFileFromTerminal {
+        remote_path: crate::code::buffer_location::RemotePath,
+        line_col: Option<LineAndColumnArg>,
+    },
     /// Emitted when a file in the file tree is renamed.
     #[cfg(feature = "local_fs")]
     FileRenamed {
@@ -1885,6 +1899,8 @@ pub enum ContextMenuType {
     Prompt { position: Vector2F },
     /// Opened via right-clicking on the input box.
     Input { position: Vector2F },
+    /// 检测到 PTY 输出密码提示后自动打开。
+    OneKeyPrompt,
 
     /// Lists the block(s) or text attached as context to the query represented in the AI block
     /// whose view id is the given [`EntityId`]. The menu is opened by clicking on the attached
@@ -1922,6 +1938,7 @@ impl ContextMenuType {
             ContextMenuType::AltScreen { position } => Some(*position),
             ContextMenuType::Prompt { position } => Some(*position),
             ContextMenuType::Input { position } => Some(*position),
+            ContextMenuType::OneKeyPrompt => None,
             ContextMenuType::AIBlockAttachedContext { .. } => None,
             ContextMenuType::AIBlockOverflowMenu { .. } => None,
         }
@@ -1940,6 +1957,7 @@ impl ContextMenuInfo {
             ContextMenuType::BlockList { .. } => "Block",
             ContextMenuType::Prompt { .. } => "Prompt",
             ContextMenuType::Input { .. } => "Input",
+            ContextMenuType::OneKeyPrompt => "OneKeyPrompt",
             ContextMenuType::AltScreen { .. } => "AltScreen",
             ContextMenuType::AIBlockAttachedContext { .. } => "AIBlockContextList",
             ContextMenuType::AIBlockOverflowMenu { .. } => "AIBlockOverflowMenu",
@@ -1960,6 +1978,7 @@ impl ContextMenuInfo {
             },
             ContextMenuType::Prompt { .. } => "RightClick",
             ContextMenuType::Input { .. } => "RightClick",
+            ContextMenuType::OneKeyPrompt => "PasswordPrompt",
             ContextMenuType::AltScreen { .. } => "AltScreen",
             ContextMenuType::AIBlockAttachedContext { .. } => "AIBlockAttachedBlockChipLeftClick",
             ContextMenuType::AIBlockOverflowMenu { .. } => "AIBlockOverflowMenuClick",
@@ -2236,6 +2255,12 @@ impl DropTargetData for TerminalDropTargetData {
     }
 }
 
+struct OneKeyPromptCandidate {
+    label: String,
+    subtitle: String,
+    secret: zeroize::Zeroizing<String>,
+}
+
 pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
@@ -2279,6 +2304,11 @@ pub struct TerminalView {
 
     /// None iff there is no context menu open currently.
     context_menu_state: Option<ContextMenuState>,
+    onekey_prompt_candidates: Vec<OneKeyPromptCandidate>,
+    onekey_last_prompt_at: Option<Instant>,
+    /// `secret_injector` 起飞后到完成/超时之间为 true。OneKey listener 看到
+    /// true 直接跳过,避免与自动注入同时弹菜单。
+    ssh_secret_auto_injection_in_flight: bool,
 
     /// The search bar at the top of the terminal view.
     find_bar: ViewHandle<Find<TerminalFindModel>>,
@@ -2383,6 +2413,23 @@ pub struct TerminalView {
 
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     file_link_scanning_join_handle: Option<JoinHandle<()>>,
+
+    /// OpenWarp:远端 SSH 会话的 cwd 目录列表缓存,用于精确校验终端文件链接。
+    ///
+    /// 键是 `(session_id, cwd 绝对路径)`,值为该目录的真实子项列表;`None`
+    /// 表示该 cwd 的列表正在异步拉取中(daemon `ListDirectory` RPC)。
+    /// 用 `IndexMap` 保持插入顺序,容量上限定义在
+    /// `link_detection::remote_dir_listing_context` 中的 `MAX_ENTRIES`,
+    /// 拉取新 cwd 触发 FIFO 淘汰。本地会话永不写入此缓存。
+    #[cfg(all(
+        feature = "local_tty",
+        feature = "local_fs",
+        not(target_family = "wasm")
+    ))]
+    remote_dir_listing_cache: indexmap::IndexMap<
+        (warp_core::SessionId, PathBuf),
+        Option<std::sync::Arc<crate::util::file::RemoteDirListing>>,
+    >,
 
     last_focus_ts: Option<NaiveDateTime>,
     tips_completed: ModelHandle<TipsCompleted>,
@@ -3658,6 +3705,11 @@ impl TerminalView {
             });
         }
 
+        let onekey_pty_reads_rx = inactive_pty_reads_rx.clone();
+        if FeatureFlag::OneKeyPrompt.is_enabled() {
+            Self::spawn_onekey_prompt_listener(onekey_pty_reads_rx, ctx);
+        }
+
         // Here we initialize the block list mouse states for block zero.
         // Afterwards, we initialize all block list mouse states for a block when the
         // previous block sends a `BlockCompleted` event.
@@ -3747,6 +3799,9 @@ impl TerminalView {
             horizontal_clipped_scroll_state: Default::default(),
             is_selecting: false,
             context_menu_state: None,
+            onekey_prompt_candidates: Vec::new(),
+            onekey_last_prompt_at: None,
+            ssh_secret_auto_injection_in_flight: false,
             context_menu,
             hovered_secret: None,
             open_secret_tool_tip: None,
@@ -3787,6 +3842,12 @@ impl TerminalView {
             inline_banners_state: Default::default(),
             bookmarked_blocks: Default::default(),
             file_link_scanning_join_handle: None,
+            #[cfg(all(
+                feature = "local_tty",
+                feature = "local_fs",
+                not(target_family = "wasm")
+            ))]
+            remote_dir_listing_cache: indexmap::IndexMap::new(),
             last_focus_ts: None,
             tips_completed: resources.tips_completed.clone(),
             was_ever_visible: false,
@@ -4110,6 +4171,7 @@ impl TerminalView {
                     | RemoteServerManagerEvent::HostDisconnected { .. }
                     | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
                     | RemoteServerManagerEvent::RepoMetadataUpdated { .. }
+                    | RemoteServerManagerEvent::BufferUpdated { .. }
                     | RemoteServerManagerEvent::RepoMetadataDirectoryLoaded { .. } => {}
                 }
             });
@@ -7115,6 +7177,39 @@ impl TerminalView {
     ) -> Option<async_broadcast::InactiveReceiver<std::sync::Arc<Vec<u8>>>> {
         self.pty_recorder
             .read(ctx, |recorder, _| recorder.inactive_pty_reads_rx())
+    }
+
+    fn spawn_onekey_prompt_listener(
+        pty_reads_rx: Option<async_broadcast::InactiveReceiver<Arc<Vec<u8>>>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(rx) = pty_reads_rx else {
+            return;
+        };
+
+        let prompt_stream = stream! {
+            let mut active = rx.activate_cloned();
+            let mut buf: Vec<u8> = Vec::with_capacity(ONEKEY_PROMPT_SLIDING_WINDOW_BYTES);
+            while let Ok(chunk) = active.recv().await {
+                buf.extend_from_slice(&chunk);
+                if buf.len() > ONEKEY_PROMPT_BUFFER_HARD_LIMIT {
+                    let drop_n = buf.len() - ONEKEY_PROMPT_SLIDING_WINDOW_BYTES;
+                    buf.drain(..drop_n);
+                }
+                if bytes_look_like_password_prompt(&buf) {
+                    buf.clear();
+                    yield ();
+                }
+            }
+        };
+
+        let _ = ctx.spawn_stream_local(
+            prompt_stream,
+            |view, (), ctx| {
+                view.show_onekey_prompt_menu(ctx);
+            },
+            |_, _| {},
+        );
     }
 
     fn write_agent_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
@@ -15147,7 +15242,16 @@ impl TerminalView {
     ) {
         ctx.update_view(&self.context_menu, |context_menu, view_ctx| {
             context_menu.set_origin(menu_state.menu_type.origin());
-            context_menu.set_width(CONTEXT_MENU_WIDTH);
+            let width = match menu_state.menu_type {
+                ContextMenuType::OneKeyPrompt => ONEKEY_CONTEXT_MENU_WIDTH,
+                ContextMenuType::BlockList { .. }
+                | ContextMenuType::AltScreen { .. }
+                | ContextMenuType::Prompt { .. }
+                | ContextMenuType::Input { .. }
+                | ContextMenuType::AIBlockAttachedContext { .. }
+                | ContextMenuType::AIBlockOverflowMenu { .. } => CONTEXT_MENU_WIDTH,
+            };
+            context_menu.set_width(width);
             // This will also reset the selection.
             context_menu.set_items(items, view_ctx);
         });
@@ -15172,6 +15276,104 @@ impl TerminalView {
             );
             ctx.notify();
         });
+    }
+
+    fn show_onekey_prompt_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.context_menu_state.is_some()
+            || self.ssh_secret_auto_injection_in_flight
+            || self
+                .onekey_last_prompt_at
+                .is_some_and(|instant| instant.elapsed() < ONEKEY_PROMPT_THROTTLE)
+        {
+            return;
+        }
+
+        // 抢占 throttle 窗口,防止 stream 紧接着第二次 yield 时又起一个 spawn。
+        self.onekey_last_prompt_at = Some(Instant::now());
+
+        // Keychain + SQLite 都是同步阻塞 API,不能在 UI 线程跑。
+        // 走 spawn_blocking,完成后回到主线程展示菜单。
+        let future = async move {
+            tokio::task::spawn_blocking(load_saved_ssh_credentials)
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("onekey: join error: {e}")))
+        };
+        ctx.spawn(future, move |view, result, ctx| {
+            let credentials = match result {
+                Ok(credentials) => credentials,
+                Err(e) => {
+                    log::warn!("onekey: failed to load saved ssh credentials: {e:?}");
+                    return;
+                }
+            };
+            if credentials.is_empty() {
+                return;
+            }
+            // 二次确认:加载途中可能用户已经手动打开菜单或 injector 起飞了。
+            if view.context_menu_state.is_some() || view.ssh_secret_auto_injection_in_flight {
+                return;
+            }
+
+            view.onekey_prompt_candidates = credentials
+                .into_iter()
+                .map(|credential| OneKeyPromptCandidate {
+                    label: credential.label,
+                    subtitle: credential.subtitle,
+                    secret: credential.secret,
+                })
+                .collect();
+
+            let items = view
+                .onekey_prompt_candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    MenuItemFields::new_with_stacked_label(
+                        candidate.label.clone(),
+                        candidate.subtitle.clone(),
+                    )
+                    .with_icon(icons::Icon::Key)
+                    .with_on_select_action(TerminalAction::OneKeyFillSecret { index })
+                    .into_item()
+                })
+                .collect();
+            view.show_context_menu(
+                ContextMenuState {
+                    menu_type: ContextMenuType::OneKeyPrompt,
+                },
+                items,
+                ctx,
+            );
+            ctx.update_view(&view.context_menu, |context_menu, ctx| {
+                context_menu.select_next(ctx);
+            });
+        });
+    }
+
+    fn fill_onekey_secret(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let Some(candidate) = self.onekey_prompt_candidates.get(index) else {
+            self.close_context_menu(ctx, true);
+            return;
+        };
+        let mut bytes = candidate.secret.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.write_to_pty(bytes, ctx);
+        self.close_context_menu(ctx, true);
+    }
+
+    pub(crate) fn note_ssh_secret_auto_injected(&mut self, ctx: &mut ViewContext<Self>) {
+        self.onekey_last_prompt_at = Some(Instant::now());
+        if matches!(
+            self.context_menu_state.map(|state| state.menu_type),
+            Some(ContextMenuType::OneKeyPrompt)
+        ) {
+            self.close_context_menu(ctx, true);
+        }
+    }
+
+    /// 仅由 `secret_injector` 在起飞/结束时调用。详见字段文档。
+    pub(crate) fn set_ssh_secret_auto_injection_in_flight(&mut self, in_flight: bool) {
+        self.ssh_secret_auto_injection_in_flight = in_flight;
     }
 
     fn alt_mouse_action(&mut self, mouse_state: &MouseState, ctx: &mut ViewContext<Self>) {
@@ -15658,6 +15860,82 @@ impl TerminalView {
         }
     }
 
+    /// OpenWarp:若当前活动 block 所属会话是 remote-server 会话,返回其 `HostId`。
+    ///
+    /// 用于在终端里 Ctrl/Cmd+点击文件路径时,判断应当走本地还是远端 buffer-sync
+    /// 打开流程。非 remote-server 会话返回 `None`(保持本地行为不变)。
+    #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+    fn active_session_remote_host_id(&self, ctx: &AppContext) -> Option<warp_core::HostId> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if !FeatureFlag::SshRemoteServer.is_enabled() {
+                return None;
+            }
+            let session_id = self.active_block_session_id()?;
+            let mgr = RemoteServerManager::handle(ctx);
+            mgr.as_ref(ctx).host_id_for_session(session_id).cloned()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = ctx;
+            None
+        }
+    }
+
+    /// OpenWarp:把终端文件链接里已解析出的绝对路径当作远端路径,构造 `RemotePath`。
+    /// 远端 SSH 主机均为 Unix,路径字符串由 shell-integration 上报的远端 cwd 拼接而来。
+    #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+    fn remote_path_from_terminal_path(
+        host_id: warp_core::HostId,
+        path: &std::path::Path,
+    ) -> Option<crate::code::buffer_location::RemotePath> {
+        let path_str = path.to_str()?;
+        let standardized = warp_util::standardized_path::StandardizedPath::try_new(path_str)
+            .map_err(|e| {
+                log::warn!("无法将终端文件路径转换为远端路径 {path_str:?}: {e}");
+            })
+            .ok()?;
+        Some(crate::code::buffer_location::RemotePath::new(
+            host_id,
+            standardized,
+        ))
+    }
+
+    /// OpenWarp:判断终端文件链接里的远端路径是否指向目录。
+    ///
+    /// 依据是缓存下来的远端 cwd 目录列表(由 `link_detection.rs` 拉取并写入)。
+    /// 未缓存或非目录返回 `false`(按文件处理)。
+    #[cfg(all(
+        feature = "local_tty",
+        feature = "local_fs",
+        not(target_family = "wasm")
+    ))]
+    fn remote_clicked_path_is_dir(
+        &self,
+        session_id: warp_core::SessionId,
+        path: &std::path::Path,
+    ) -> bool {
+        path.parent().is_some_and(|parent| {
+            self.remote_dir_listing_cache
+                .get(&(session_id, parent.to_path_buf()))
+                .and_then(|entry| entry.as_ref())
+                .is_some_and(|listing| crate::util::file::remote_path_is_dir(path, listing))
+        })
+    }
+
+    /// OpenWarp:在当前(远端)终端会话里 `cd` 进指定目录。
+    ///
+    /// 与本地点击目录链接的行为对齐 —— 远端目录无法在编辑器里打开,改为
+    /// 在该远端 shell 会话中执行 `cd <dir>`。
+    #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+    fn cd_into_remote_directory(&mut self, path: &std::path::Path, ctx: &mut ViewContext<Self>) {
+        // 对路径做 shell 转义,防止包含 `"`、`$(...)`、反引号等字符时被远端 shell 执行注入命令。
+        let quoted_dir = shell_words::quote(&path.to_string_lossy()).into_owned();
+        self.input.update(ctx, |input, ctx| {
+            input.try_execute_command(format!("cd -- {quoted_dir}").as_str(), ctx);
+        });
+    }
+
     #[cfg(feature = "local_fs")]
     fn open_file_path(
         &mut self,
@@ -15666,6 +15944,26 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         ctx.notify();
+
+        // OpenWarp:远端 SSH 会话走 buffer-sync 协议打开远端文件。
+        #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+        if let Some(host_id) = self.active_session_remote_host_id(ctx) {
+            // 远端目录点击:不在编辑器里打开,改为在该远端会话里 `cd` 进去。
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(session_id) = self.active_block_session_id() {
+                if self.remote_clicked_path_is_dir(session_id, &path) {
+                    self.cd_into_remote_directory(&path, ctx);
+                    return;
+                }
+            }
+            if let Some(remote_path) = Self::remote_path_from_terminal_path(host_id, &path) {
+                ctx.emit(Event::OpenRemoteFileFromTerminal {
+                    remote_path,
+                    line_col: line_and_column_num,
+                });
+            }
+            return;
+        }
 
         let settings = EditorSettings::as_ref(ctx);
         let target = resolve_file_target(&path, settings, None);
@@ -15686,6 +15984,28 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         ctx.notify();
+
+        // OpenWarp:远端 SSH 会话走 buffer-sync 协议打开远端文件。
+        // 远端文件统一在内嵌代码编辑器打开,忽略 `target`(外部编辑器无法访问远端文件)。
+        #[cfg(all(feature = "local_tty", feature = "local_fs"))]
+        if let Some(host_id) = self.active_session_remote_host_id(ctx) {
+            // 远端目录点击:不在编辑器里打开,改为在该远端会话里 `cd` 进去。
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(session_id) = self.active_block_session_id() {
+                if self.remote_clicked_path_is_dir(session_id, &path) {
+                    self.cd_into_remote_directory(&path, ctx);
+                    return;
+                }
+            }
+            if let Some(remote_path) = Self::remote_path_from_terminal_path(host_id, &path) {
+                ctx.emit(Event::OpenRemoteFileFromTerminal {
+                    remote_path,
+                    line_col: line_and_column_num,
+                });
+            }
+            return;
+        }
+
         ctx.emit(Event::OpenFileWithTarget {
             path,
             target,
@@ -17924,8 +18244,10 @@ impl TerminalView {
     }
 
     fn close_context_menu(&mut self, ctx: &mut ViewContext<Self>, should_redetermine_focus: bool) {
-        if self.context_menu_state.is_some() {
-            self.context_menu_state = None;
+        if let Some(state) = self.context_menu_state.take() {
+            if matches!(state.menu_type, ContextMenuType::OneKeyPrompt) {
+                self.onekey_prompt_candidates.clear();
+            }
             ctx.notify();
             if should_redetermine_focus {
                 self.redetermine_global_focus(ctx);
@@ -22639,6 +22961,7 @@ impl TypedActionView for TerminalView {
             InsertCommandCorrection { .. }
             | BlockListContextMenu(_)
             | CloseContextMenu
+            | OneKeyFillSecret { .. }
             | Paste
             | MiddleClickOnGrid { .. }
             | MiddleClickOnInput
@@ -22929,6 +23252,7 @@ impl TypedActionView for TerminalView {
                 }
             }
             CloseContextMenu => self.close_context_menu(ctx, true),
+            OneKeyFillSecret { index } => self.fill_onekey_secret(*index, ctx),
             Paste => self.paste(false, ctx),
             Copy => self.copy(ctx),
             CopyOutputs => self.copy_outputs(ctx),
@@ -23966,6 +24290,27 @@ impl View for TerminalView {
                             ChildAnchor::TopLeft,
                         )
                     }
+                },
+            ),
+            Some(ContextMenuType::OneKeyPrompt) => stack.add_positioned_overlay_child(
+                ChildView::new(&self.context_menu).finish(),
+                match input_mode {
+                    InputMode::PinnedToBottom | InputMode::Waterfall => {
+                        OffsetPositioning::offset_from_save_position_element(
+                            self.input.as_ref(app).save_position_id(),
+                            vec2f(0., -8.),
+                            PositionedElementOffsetBounds::WindowByPosition,
+                            PositionedElementAnchor::TopLeft,
+                            ChildAnchor::BottomLeft,
+                        )
+                    }
+                    InputMode::PinnedToTop => OffsetPositioning::offset_from_save_position_element(
+                        self.input.as_ref(app).save_position_id(),
+                        vec2f(0., 8.),
+                        PositionedElementOffsetBounds::WindowByPosition,
+                        PositionedElementAnchor::BottomLeft,
+                        ChildAnchor::TopLeft,
+                    ),
                 },
             ),
             Some(ContextMenuType::AIBlockAttachedContext { ai_block_view_id }) => stack
