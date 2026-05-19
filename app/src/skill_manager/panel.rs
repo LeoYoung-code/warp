@@ -93,13 +93,15 @@ impl SkillManagerPanel {
         let skill_manager = SkillManager::handle(ctx);
         ctx.subscribe_to_model(&skill_manager, |me, _manager, event, ctx| match event {
             SkillManagerEvent::InventoryChanged => {
-                if me
-                    .provider_filter
-                    .is_some_and(|provider| !me.provider_filter_still_valid(ctx, provider))
-                {
+                let inventory = SkillManager::as_ref(ctx).list_skill_inventory(ctx);
+                if me.provider_filter.is_some_and(|provider| {
+                    !Self::providers_in_inventory(&inventory).contains(&provider)
+                }) {
                     me.provider_filter = None;
                 }
-                me.scroll_selected_path_into_view_with_ctx(ctx);
+                let query = me.query(ctx);
+                let items = Self::filter_inventory(&inventory, &query, me.provider_filter);
+                me.scroll_selected_path_into_view(&items);
                 ctx.notify();
             }
         });
@@ -131,11 +133,6 @@ impl SkillManagerPanel {
             .collect::<Vec<_>>();
         providers.sort_by_key(|provider| provider.to_string());
         providers
-    }
-
-    fn provider_filter_still_valid(&self, ctx: &AppContext, provider: SkillProvider) -> bool {
-        let inventory = SkillManager::as_ref(ctx).list_skill_inventory(ctx);
-        Self::providers_in_inventory(&inventory).contains(&provider)
     }
 
     fn filter_inventory(
@@ -516,6 +513,7 @@ impl View for SkillManagerPanel {
 
     fn on_focus(&mut self, _focus_ctx: &warpui::FocusContext, ctx: &mut ViewContext<Self>) {
         ctx.focus(&self.query_editor);
+        self.scroll_selected_path_into_view_with_ctx(ctx);
         ctx.notify();
     }
 
