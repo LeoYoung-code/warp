@@ -40,6 +40,8 @@ env:
   # channel_config::load_config!() 宏 → build.rs 调 warp-channel-config 失败 →
   # *_config.json 不生成 → include_str! 编译失败。
   CHANNEL: oss
+  HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'LeoYoung-code/homebrew-openwarp' }}
+  RELEASE_ASSET_NAME: OpenWarp-arm64.dmg
 
 jobs:
   prepare_metadata:
@@ -50,6 +52,7 @@ jobs:
       release_branch: ${{ steps.compute_tag.outputs.branch }}
       release_name: ${{ steps.get-config.outputs.release_base_name }} ${{ steps.compute_tag.outputs.tag }}
       release_body: ${{ steps.get-config.outputs.release_body_text }}
+      cask_version: ${{ steps.compute_tag.outputs.cask_version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -73,8 +76,10 @@ jobs:
             TAG="v0.$(date +%Y.%m.%d.%H%M)"
             BRANCH="${GITHUB_REF#refs/heads/}"
           fi
+          CASK_VERSION="${TAG#v}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "cask_version=$CASK_VERSION" >> $GITHUB_OUTPUT
           echo "Release tag: $TAG / build ref: $BRANCH"
 
   release_macos:
@@ -438,3 +443,103 @@ jobs:
             gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
           done
         shell: bash
+
+  update_homebrew:
+    name: Update Homebrew cask
+    runs-on: macos-latest
+    needs:
+      - prepare_metadata
+      - publish_release
+    steps:
+      - name: Download release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          RELEASE_ASSET_NAME: ${{ env.RELEASE_ASSET_NAME }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$RELEASE_ASSET_NAME" \
+            --dir dist
+          test -f "dist/$RELEASE_ASSET_NAME"
+
+      - name: Compute sha256
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256="$(shasum -a 256 "dist/$RELEASE_ASSET_NAME" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "DMG sha256: $sha256"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-openwarp
+
+      - name: Update cask
+        shell: bash
+        working-directory: homebrew-openwarp
+        env:
+          CASK_VERSION: ${{ needs.prepare_metadata.outputs.cask_version }}
+          CASK_SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p Casks
+          ruby - <<'RUBY'
+          version = ENV.fetch("CASK_VERSION")
+          sha256 = ENV.fetch("CASK_SHA256")
+          cask = <<~CASK
+            cask "openwarp" do
+              version "#{version}"
+              sha256 "#{sha256}"
+
+              url "https://github.com/LeoYoung-code/warp/releases/download/v\#{version}/OpenWarp-arm64.dmg"
+              name "OpenWarp"
+              desc "Open-source build of Warp terminal"
+              homepage "https://github.com/LeoYoung-code/warp"
+
+              app "OpenWarp.app"
+
+              zap trash: [
+                "~/Library/Application Support/dev.openwarp.OpenWarp",
+                "~/Library/Preferences/dev.openwarp.OpenWarp.plist",
+              ]
+            end
+          CASK
+          File.write("Casks/openwarp.rb", cask)
+          RUBY
+
+      - name: Audit cask
+        shell: bash
+        working-directory: homebrew-openwarp
+        run: |
+          set -euo pipefail
+          brew tap LeoYoung-code/openwarp "$PWD"
+          tap_repo="$(brew --repository leoyoung-code/openwarp)"
+          cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
+          brew audit --cask --strict openwarp
+
+      - name: Commit and push cask update
+        shell: bash
+        working-directory: homebrew-openwarp
+        env:
+          CASK_VERSION: ${{ needs.prepare_metadata.outputs.cask_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Casks/openwarp.rb; then
+            echo "Casks/openwarp.rb already up to date."
+            exit 0
+          fi
+
+          git add Casks/openwarp.rb
+          git commit -m "chore(release): 发布 OpenWarp $CASK_VERSION"
+          git push
