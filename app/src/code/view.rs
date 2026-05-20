@@ -50,8 +50,8 @@ use warpui::{
     id,
     keymap::EditableBinding,
     ui_components::{button::ButtonVariant, components::UiComponent},
-    AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle, WindowId,
+    AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle, WindowId,
 };
 
 use crate::{
@@ -246,6 +246,12 @@ pub struct CodeView {
     window_id: WindowId,
     drag_position: Option<TabBarDragPosition>,
     markdown_mode_segmented_control: Option<ViewHandle<MarkdownToggleView>>,
+    /// 等待远端 SaveBuffer 异步完成的 callback,key 为 `LocalCodeEditorView`
+    /// 的 `EntityId`。远端 buffer 的 `save_local` 立刻返回 `Ok(())`,daemon 实际
+    /// 落盘要等 `LocalCodeEditorEvent::FileSaved` / `FailedToSave` 异步事件;
+    /// "关 tab"对应的 callback 必须延迟到这条事件到达,否则保存失败时 tab 已被
+    /// 关闭,用户看不到错误。
+    pending_remote_save_callbacks: HashMap<EntityId, SaveCallback>,
 }
 
 impl CodeView {
@@ -262,6 +268,7 @@ impl CodeView {
             window_id,
             drag_position: None,
             markdown_mode_segmented_control: None,
+            pending_remote_save_callbacks: HashMap::new(),
         }
     }
 
@@ -614,10 +621,20 @@ impl CodeView {
                 me.set_title_after_content_update(ctx);
                 CodeView::display_save_success(ctx.window_id(), ctx);
                 ctx.notify();
+                // 远端异步 Save 完成:触发暂存的 close-tab callback。
+                if let Some(cb) = me.pending_remote_save_callbacks.remove(&emitter.id()) {
+                    cb(SaveOutcome::Succeeded, me, ctx);
+                }
             }
             LocalCodeEditorEvent::FailedToSave { error: err } => {
                 log::warn!("Failed to load file. {err:?}");
                 CodeView::display_save_failure(ctx.window_id(), ctx);
+                // 远端异步 Save 失败:tab 必须留下,告知 callback 走 Failed 分支。
+                // `remove_tab_with_intent` 的 Save 分支只在 `outcome != Canceled`
+                // 时关 tab —— 这里给 Failed,会按下面 (i) 的策略保留 tab。
+                if let Some(cb) = me.pending_remote_save_callbacks.remove(&emitter.id()) {
+                    cb(SaveOutcome::Failed, me, ctx);
+                }
             }
             LocalCodeEditorEvent::DiffAccepted => {
                 CodeManager::handle(ctx).update(ctx, |code_manager, ctx| {
@@ -900,6 +917,16 @@ impl CodeView {
         callback: Option<SaveCallback>,
         ctx: &mut ViewContext<Self>,
     ) -> SaveStatus {
+        // 远端 buffer 的 `save_local` 仅触发 `SaveBuffer` 协议消息,daemon 实际
+        // 落盘要等 `LocalCodeEditorEvent::FileSaved` / `FailedToSave` 异步事件。
+        // 这里记下 editor entity id 与 "是否远端",在 `Ok` 分支按需暂存 callback。
+        let remote_save_target = self.tab_at(index).and_then(|tab| {
+            let editor = tab.editor_view.as_ref(ctx);
+            let file_id = editor.file_id()?;
+            let is_remote = GlobalBufferModel::as_ref(ctx).is_remote(file_id);
+            is_remote.then(|| tab.editor_view.id())
+        });
+
         // This will only return an error immediately if there is a failure in the sync part of the call.
         // Other errors could be returned asynchronously via the FileModelEvent::FailedToSave event.
         let result = self
@@ -925,12 +952,18 @@ impl CodeView {
                 }
                 SaveStatus::Failed(err)
             }
-            Ok(()) => {
-                if let Some(callback) = callback {
-                    callback(SaveOutcome::Succeeded, self, ctx);
+            Ok(()) => match (remote_save_target, callback) {
+                (Some(editor_id), Some(cb)) => {
+                    // 远端:暂存 callback,等 FileSaved / FailedToSave 事件再触发。
+                    self.pending_remote_save_callbacks.insert(editor_id, cb);
+                    SaveStatus::AsyncSaveInProgress
                 }
-                SaveStatus::SavedImmediately
-            }
+                (_, Some(cb)) => {
+                    cb(SaveOutcome::Succeeded, self, ctx);
+                    SaveStatus::SavedImmediately
+                }
+                (_, None) => SaveStatus::SavedImmediately,
+            },
         }
     }
 
@@ -1042,6 +1075,20 @@ impl CodeView {
     }
 
     pub fn cleanup_all_tabs(&mut self, ctx: &mut ViewContext<Self>) {
+        // 与 `remove_tab_data_index_inner` 一致:主动关闭所有 buffer,避免
+        // `GlobalBufferModel` 残留旧 buffer 让下次重新打开看到未保存的内存内容,
+        // 同时让 daemon 释放远端 buffer 内存。
+        let file_ids: Vec<_> = self
+            .tab_group
+            .iter()
+            .filter_map(|tab| tab.editor_view.as_ref(ctx).file_id())
+            .collect();
+        GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
+            for file_id in file_ids {
+                model.close_buffer(file_id, ctx);
+            }
+        });
+
         self.tab_group.clear();
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_deallocated_buffers(ctx);
@@ -1224,6 +1271,39 @@ impl CodeView {
     }
 
     fn remove_tab_data_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        self.remove_tab_data_index_inner(index, /* close_buffer */ true, ctx);
+    }
+
+    /// 与 [`Self::remove_tab_data_index`] 相同,但**不主动关闭** buffer。
+    /// 用于跨 pane / 跨窗口拖拽:tab 只是搬家,buffer 状态(及远端 buffer
+    /// 在 daemon 端的内存)必须保留给新 pane 复用。
+    fn remove_tab_data_index_for_move(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        self.remove_tab_data_index_inner(index, /* close_buffer */ false, ctx);
+    }
+
+    fn remove_tab_data_index_inner(
+        &mut self,
+        index: usize,
+        close_buffer: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // 主动关闭 buffer:对于关闭 tab 的场景,必须主动清理 `GlobalBufferModel`
+        // 内的 `InternalBufferState`(`remove_deallocated_buffers` 只清已被 drop
+        // 的 `WeakHandle`,而此时 `TabData` 还强持有 buffer 间接引用)。否则
+        // 远端 buffer 下次打开会复用包含未保存编辑的旧状态,造成"看着已保存"
+        // 的假象。详见 `GlobalBufferModel::close_buffer`。
+        if close_buffer {
+            if let Some(file_id) = self
+                .tab_group
+                .get(index)
+                .and_then(|tab| tab.editor_view.as_ref(ctx).file_id())
+            {
+                GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.close_buffer(file_id, ctx);
+                });
+            }
+        }
+
         self.tab_group.remove(index);
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_deallocated_buffers(ctx);
@@ -1249,7 +1329,7 @@ impl CodeView {
                         CodeSource::RemoteFileTree { remote_path }
                     }
                 };
-                self.remove_tab_data_index(index, ctx);
+                self.remove_tab_data_index_for_move(index, ctx);
                 CodePane::new(source, None, ctx)
             })
     }
@@ -1265,7 +1345,10 @@ impl CodeView {
                 self.save_local(
                     index,
                     Some(Box::new(move |outcome, me, ctx| {
-                        if outcome != SaveOutcome::Canceled {
+                        // 仅在保存成功时才关 tab。远端保存通过异步事件回填
+                        // `SaveOutcome::Failed`,此时 tab 必须留下,让用户看到
+                        // toast 错误并能重试或显式 Discard。Canceled 同样不关。
+                        if outcome == SaveOutcome::Succeeded {
                             me.remove_tab_data_index(index, ctx);
                         }
                     })),
@@ -1291,7 +1374,9 @@ impl CodeView {
                 self.save_local(
                     unsaved_indices[current_index],
                     Some(Box::new(move |outcome, me, ctx| {
-                        if outcome != SaveOutcome::Canceled {
+                        // 同 `remove_tab_with_intent`:仅在成功时推进下一个。
+                        // 失败/取消都停在当前 tab,留 toast 让用户决定。
+                        if outcome == SaveOutcome::Succeeded {
                             me.process_next_tab_for_clear(unsaved_indices, current_index + 1, ctx);
                         }
                     })),
@@ -1324,6 +1409,19 @@ impl CodeView {
     }
 
     fn close_saved_tabs(&mut self, ctx: &mut ViewContext<Self>) {
+        // 主动关闭被移除的 buffer(同 `cleanup_all_tabs`)。
+        let closed_file_ids: Vec<_> = self
+            .tab_group
+            .iter()
+            .filter(|tab| !Self::has_unsaved_changes(tab, ctx))
+            .filter_map(|tab| tab.editor_view.as_ref(ctx).file_id())
+            .collect();
+        GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
+            for file_id in closed_file_ids {
+                model.close_buffer(file_id, ctx);
+            }
+        });
+
         self.tab_group
             .retain(|tab| Self::has_unsaved_changes(tab, ctx));
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {

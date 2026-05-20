@@ -314,6 +314,33 @@ impl GlobalBufferModel {
         }
     }
 
+    /// 主动关闭一个 buffer:从客户端 map 中移除,远端 buffer 额外发
+    /// `CloseBuffer` 让 daemon 释放内存 buffer。
+    ///
+    /// 不依赖 `WeakHandle` 是否失效——`remove_deallocated_buffers` 仅在 handle
+    /// 已被 drop 时清理,而 tab 关闭路径里 buffer 通常仍有强引用(`TabData`
+    /// 持有 `LocalCodeEditorView` 间接强引用 `Buffer`)。如果不主动清理,
+    /// 关 tab 后 `InternalBufferState` 残留,下次打开同一远端文件会走
+    /// `open_remote_buffer` 的 "Return existing buffer if already open" 分支
+    /// 复用包含未保存编辑的旧 buffer,造成"看着已保存"的假象。
+    #[cfg_attr(not(feature = "local_tty"), allow(unused_variables))]
+    pub fn close_buffer(&mut self, file_id: FileId, ctx: &mut ModelContext<Self>) {
+        // 远端 buffer:发 CloseBuffer 让 daemon 释放内存 buffer。
+        #[cfg(feature = "local_tty")]
+        if let Some(state) = self.buffers.get(&file_id) {
+            if let BufferSource::Remote { remote_path, .. } = &state.source {
+                let host_id = remote_path.host_id.clone();
+                let path_str = remote_path.path.as_str().to_string();
+                let manager = remote_server::manager::RemoteServerManager::handle(ctx);
+                if let Some(client) = manager.as_ref(ctx).client_for_host(&host_id) {
+                    client.close_buffer(path_str);
+                }
+            }
+        }
+
+        self.cleanup_file_id(file_id, ctx);
+    }
+
     /// Returns the buffer handle if it is 1) still exists + active 2) loaded.
     fn buffer_handle_for_id(
         &mut self,
