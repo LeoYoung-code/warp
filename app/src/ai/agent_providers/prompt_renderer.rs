@@ -582,7 +582,13 @@ mod tests {
             "websearch".into(),
             "mcp__github__create_issue".into(),
         ];
-        let out = render_system(&LLMId::from("byop:p:deepseek-chat"), &[], &tools, false, &[]);
+        let out = render_system(
+            &LLMId::from("byop:p:deepseek-chat"),
+            &[],
+            &tools,
+            false,
+            &[],
+        );
         for name in &tools {
             assert!(
                 out.contains(name),
@@ -667,7 +673,10 @@ mod tests {
             false,
             &rules,
         );
-        assert!(out.contains("# User rules"), "应渲染 user rules 区块: {out}");
+        assert!(
+            out.contains("# User rules"),
+            "应渲染 user rules 区块: {out}"
+        );
         assert!(out.contains("## My rule"), "应包含规则名: {out}");
         assert!(
             out.contains("Always use snake_case in Rust."),
