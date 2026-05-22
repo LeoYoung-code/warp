@@ -4284,9 +4284,7 @@ impl SettingsWidget for SessionRestorationWidget {
             crate::t!("settings-features-restore-session"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    "".into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: None,
                 tooltip_override_text: None,
             }),
@@ -4418,9 +4416,7 @@ impl SettingsWidget for SnackbarHeaderWidget {
             crate::t!("settings-features-show-sticky-command-header"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    "".into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: None,
                 tooltip_override_text: None,
             }),
@@ -4875,9 +4871,7 @@ impl SettingsWidget for SSHWrapperWidget {
             crate::t!("settings-features-ssh-wrapper"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    "".into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: if view.ssh_wrapper_toggled {
                     Some(crate::t!("settings-features-takes-effect-new-sessions"))
                 } else {
@@ -5307,10 +5301,7 @@ impl SettingsWidget for GlobalHotkeyWidget {
                         ui_builder
                             .link(
                                 crate::t!("settings-features-see-docs"),
-                                Some(
-                                    ""
-                                        .to_owned(),
-                                ),
+                                Some("".to_owned()),
                                 None,
                                 view.button_mouse_states.global_hotkey_link.clone(),
                             )
@@ -6332,10 +6323,7 @@ impl SettingsWidget for MouseReportingWidget {
             crate::t!("settings-features-enable-mouse-reporting"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    ""
-                        .into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: None,
                 tooltip_override_text: None,
             }),
@@ -6597,9 +6585,7 @@ impl SettingsWidget for SmartSelectWidget {
             crate::t!("settings-features-double-click-smart-selection"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    "".into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: None,
                 tooltip_override_text: None,
             }),
@@ -6848,9 +6834,7 @@ impl SettingsWidget for WorkflowsInCommandSearch {
             crate::t!("settings-features-show-global-workflows-in-command-search"),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
-                on_click_action: Some(FeaturesPageAction::OpenUrl(
-                    "".into(),
-                )),
+                on_click_action: Some(FeaturesPageAction::OpenUrl("".into())),
                 secondary_text: None,
                 tooltip_override_text: None,
             }),
