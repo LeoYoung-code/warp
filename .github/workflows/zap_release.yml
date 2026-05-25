@@ -41,7 +41,7 @@ env:
   # *_config.json 不生成 → include_str! 编译失败。
   CHANNEL: oss
   HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'LeoYoung-code/homebrew-openwarp' }}
-  RELEASE_ASSET_NAME: OpenWarp-arm64.dmg
+  RELEASE_ASSET_NAME: Zap-arm64.dmg
 
 jobs:
   prepare_metadata:
@@ -533,12 +533,12 @@ jobs:
               version "#{version}"
               sha256 "#{sha256}"
 
-              url "https://github.com/LeoYoung-code/warp/releases/download/v\#{version}/OpenWarp-arm64.dmg"
-              name "OpenWarp"
+              url "https://github.com/LeoYoung-code/warp/releases/download/v\#{version}/Zap-arm64.dmg"
+              name "Zap"
               desc "Open-source build of Warp terminal"
               homepage "https://github.com/LeoYoung-code/warp"
 
-              app "OpenWarp.app"
+              app "Zap.app"
 
               zap trash: [
                 "~/Library/Application Support/dev.openwarp.OpenWarp",

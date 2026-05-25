@@ -1,10 +1,10 @@
-name: OpenWarp Homebrew Validate
+name: Zap Homebrew Validate
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "已发布的 OpenWarp release tag，例如 openwarp-v2026.05.06.2"
+        description: "已发布的 Zap release tag，例如 v2026.05.25.1"
         required: true
         type: string
 
@@ -13,7 +13,7 @@ permissions:
 
 env:
   HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'LeoYoung-code/homebrew-openwarp' }}
-  RELEASE_ASSET_NAME: OpenWarp-arm64.dmg
+  RELEASE_ASSET_NAME: Zap-arm64.dmg
 
 jobs:
   validate_homebrew:
@@ -26,8 +26,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_TAG" != openwarp-v* ]]; then
-            echo "::error::release_tag 必须以 openwarp-v 开头: $RELEASE_TAG"
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::release_tag 必须以 v 开头: $RELEASE_TAG"
             exit 1
           fi
 
@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cask_version="${RELEASE_TAG#openwarp-v}"
+          cask_version="${RELEASE_TAG#v}"
           sha256="$(shasum -a 256 "dist/$RELEASE_ASSET_NAME" | awk '{print $1}')"
           echo "cask_version=$cask_version" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
@@ -81,12 +81,12 @@ jobs:
               version "#{version}"
               sha256 "#{sha256}"
 
-              url "https://github.com/LeoYoung-code/warp/releases/download/openwarp-v\#{version}/OpenWarp-arm64.dmg"
-              name "OpenWarp"
+              url "https://github.com/LeoYoung-code/warp/releases/download/v\#{version}/Zap-arm64.dmg"
+              name "Zap"
               desc "Open-source build of Warp terminal"
               homepage "https://github.com/LeoYoung-code/warp"
 
-              app "OpenWarp.app"
+              app "Zap.app"
 
               zap trash: [
                 "~/Library/Application Support/dev.openwarp.OpenWarp",
@@ -124,7 +124,7 @@ jobs:
           CASK_SHA256: ${{ steps.meta.outputs.sha256 }}
         run: |
           {
-            echo "## OpenWarp Homebrew validation"
+            echo "## Zap Homebrew validation"
             echo
             echo "- Tag: $RELEASE_TAG"
             echo "- Version: $CASK_VERSION"
