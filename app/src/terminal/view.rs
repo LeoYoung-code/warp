@@ -1967,7 +1967,9 @@ impl ContextMenuInfo {
             ContextMenuType::BlockList { .. } => "Block",
             ContextMenuType::Prompt { .. } => "Prompt",
             ContextMenuType::Input { .. } => "Input",
-            ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => "OneKeyPrompt",
+            ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => {
+                "OneKeyPrompt"
+            }
             ContextMenuType::AltScreen { .. } => "AltScreen",
             ContextMenuType::AIBlockAttachedContext { .. } => "AIBlockContextList",
             ContextMenuType::AIBlockOverflowMenu { .. } => "AIBlockOverflowMenu",
@@ -1988,7 +1990,9 @@ impl ContextMenuInfo {
             },
             ContextMenuType::Prompt { .. } => "RightClick",
             ContextMenuType::Input { .. } => "RightClick",
-            ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => "PasswordPrompt",
+            ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => {
+                "PasswordPrompt"
+            }
             ContextMenuType::AltScreen { .. } => "AltScreen",
             ContextMenuType::AIBlockAttachedContext { .. } => "AIBlockAttachedBlockChipLeftClick",
             ContextMenuType::AIBlockOverflowMenu { .. } => "AIBlockOverflowMenuClick",
@@ -15268,7 +15272,9 @@ impl TerminalView {
         ctx.update_view(&self.context_menu, |context_menu, view_ctx| {
             context_menu.set_origin(menu_state.menu_type.origin());
             let width = match menu_state.menu_type {
-                ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => ONEKEY_CONTEXT_MENU_WIDTH,
+                ContextMenuType::OneKeyPrompt | ContextMenuType::SuRootPasswordConfirm => {
+                    ONEKEY_CONTEXT_MENU_WIDTH
+                }
                 ContextMenuType::BlockList { .. }
                 | ContextMenuType::AltScreen { .. }
                 | ContextMenuType::Prompt { .. }
@@ -24532,27 +24538,31 @@ impl View for TerminalView {
                     }
                 },
             ),
-            Some(ContextMenuType::OneKeyPrompt) | Some(ContextMenuType::SuRootPasswordConfirm) => stack.add_positioned_overlay_child(
-                ChildView::new(&self.context_menu).finish(),
-                match input_mode {
-                    InputMode::PinnedToBottom | InputMode::Waterfall => {
-                        OffsetPositioning::offset_from_save_position_element(
-                            self.input.as_ref(app).save_position_id(),
-                            vec2f(0., -8.),
-                            PositionedElementOffsetBounds::WindowByPosition,
-                            PositionedElementAnchor::TopLeft,
-                            ChildAnchor::BottomLeft,
-                        )
-                    }
-                    InputMode::PinnedToTop => OffsetPositioning::offset_from_save_position_element(
-                        self.input.as_ref(app).save_position_id(),
-                        vec2f(0., 8.),
-                        PositionedElementOffsetBounds::WindowByPosition,
-                        PositionedElementAnchor::BottomLeft,
-                        ChildAnchor::TopLeft,
-                    ),
-                },
-            ),
+            Some(ContextMenuType::OneKeyPrompt) | Some(ContextMenuType::SuRootPasswordConfirm) => {
+                stack.add_positioned_overlay_child(
+                    ChildView::new(&self.context_menu).finish(),
+                    match input_mode {
+                        InputMode::PinnedToBottom | InputMode::Waterfall => {
+                            OffsetPositioning::offset_from_save_position_element(
+                                self.input.as_ref(app).save_position_id(),
+                                vec2f(0., -8.),
+                                PositionedElementOffsetBounds::WindowByPosition,
+                                PositionedElementAnchor::TopLeft,
+                                ChildAnchor::BottomLeft,
+                            )
+                        }
+                        InputMode::PinnedToTop => {
+                            OffsetPositioning::offset_from_save_position_element(
+                                self.input.as_ref(app).save_position_id(),
+                                vec2f(0., 8.),
+                                PositionedElementOffsetBounds::WindowByPosition,
+                                PositionedElementAnchor::BottomLeft,
+                                ChildAnchor::TopLeft,
+                            )
+                        }
+                    },
+                )
+            }
             Some(ContextMenuType::AIBlockAttachedContext { ai_block_view_id }) => stack
                 .add_positioned_overlay_child(
                     ChildView::new(&self.context_menu).finish(),

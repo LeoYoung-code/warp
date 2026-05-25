@@ -100,9 +100,21 @@ impl SshServerView {
         let user_editor = make_editor(false, "root", ctx);
         let password_editor = make_editor(true, "•••••••", ctx);
         let key_path_editor = make_editor(false, "/home/user/.ssh/id_ed25519", ctx);
-        let root_password_editor = make_editor(true, &crate::t!("workspace-left-panel-ssh-manager-root-password-placeholder"), ctx);
-        let startup_command_editor = make_editor(false, &crate::t!("workspace-left-panel-ssh-manager-startup-command-placeholder"), ctx);
-        let notes_editor = make_editor(false, &crate::t!("workspace-left-panel-ssh-manager-notes-placeholder"), ctx);
+        let root_password_editor = make_editor(
+            true,
+            &crate::t!("workspace-left-panel-ssh-manager-root-password-placeholder"),
+            ctx,
+        );
+        let startup_command_editor = make_editor(
+            false,
+            &crate::t!("workspace-left-panel-ssh-manager-startup-command-placeholder"),
+            ctx,
+        );
+        let notes_editor = make_editor(
+            false,
+            &crate::t!("workspace-left-panel-ssh-manager-notes-placeholder"),
+            ctx,
+        );
 
         let pane_configuration = ctx.add_model(|_ctx| PaneConfiguration::new("SSH server"));
 
@@ -264,18 +276,17 @@ impl SshServerView {
                 .get(&srv.node_id, SecretKind::RootPassword)
                 .unwrap_or(None)
                 .is_some();
-            self.root_password_editor
-                .update(ctx, |e, ctx| {
-                    e.set_buffer_text("", ctx);
-                    if root_pw_saved {
-                        e.set_placeholder_text("●●●●●●●", ctx);
-                    } else {
-                        e.set_placeholder_text(
-                            &crate::t!("workspace-left-panel-ssh-manager-root-password-placeholder"),
-                            ctx,
-                        );
-                    }
-                });
+            self.root_password_editor.update(ctx, |e, ctx| {
+                e.set_buffer_text("", ctx);
+                if root_pw_saved {
+                    e.set_placeholder_text("●●●●●●●", ctx);
+                } else {
+                    e.set_placeholder_text(
+                        &crate::t!("workspace-left-panel-ssh-manager-root-password-placeholder"),
+                        ctx,
+                    );
+                }
+            });
         }
 
         // `set_buffer_text` 默认让所有 editor 处于"全选"状态(buffer 替换 +
@@ -346,8 +357,16 @@ impl SshServerView {
             } else {
                 Some(key_path)
             },
-            startup_command: if startup_command_text.trim().is_empty() { None } else { Some(startup_command_text.trim().to_string()) },
-            notes: if notes_text.trim().is_empty() { None } else { Some(notes_text.trim().to_string()) },
+            startup_command: if startup_command_text.trim().is_empty() {
+                None
+            } else {
+                Some(startup_command_text.trim().to_string())
+            },
+            notes: if notes_text.trim().is_empty() {
+                None
+            } else {
+                Some(notes_text.trim().to_string())
+            },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
         };
 
@@ -440,8 +459,16 @@ impl SshServerView {
             } else {
                 Some(key_path)
             },
-            startup_command: if startup_command_text.trim().is_empty() { None } else { Some(startup_command_text.trim().to_string()) },
-            notes: if notes_text.trim().is_empty() { None } else { Some(notes_text.trim().to_string()) },
+            startup_command: if startup_command_text.trim().is_empty() {
+                None
+            } else {
+                Some(startup_command_text.trim().to_string())
+            },
+            notes: if notes_text.trim().is_empty() {
+                None
+            } else {
+                Some(notes_text.trim().to_string())
+            },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
         };
         ctx.dispatch_typed_action(&crate::workspace::WorkspaceAction::OpenSshTerminal {

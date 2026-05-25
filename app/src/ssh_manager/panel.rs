@@ -1011,9 +1011,13 @@ impl SshManagerPanel {
                 .get(i)
                 .cloned()
                 .unwrap_or_default();
-            let label_el = Text::new_inline(label, appearance.ui_font_family(), appearance.ui_font_subheading())
-                .with_color(theme.main_text_color(theme.background()).into())
-                .finish();
+            let label_el = Text::new_inline(
+                label,
+                appearance.ui_font_family(),
+                appearance.ui_font_subheading(),
+            )
+            .with_color(theme.main_text_color(theme.background()).into())
+            .finish();
             let row_action = action.clone();
             let item = Hoverable::new(state, move |mouse| {
                 let mut c = Container::new(label_el)

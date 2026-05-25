@@ -348,8 +348,8 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use warp_core::context_flag::ContextFlag;
-use warp_core::HostId;
 use warp_core::semantic_selection::SemanticSelection;
+use warp_core::HostId;
 use warp_util::path::{user_friendly_path, LineAndColumnArg};
 use warpui::fonts::Weight;
 use warpui::modals::{AlertDialogWithCallbacks, AppModalCallback};
@@ -18331,7 +18331,8 @@ impl Workspace {
         }
         // openWarp 独有:SSH 管理器,无 feature flag,默认始终显示。
         views.push(ToolPanelView::SshManager);
-        if FeatureFlag::ServerFileBrowser.is_enabled() && FeatureFlag::SshRemoteServer.is_enabled() {
+        if FeatureFlag::ServerFileBrowser.is_enabled() && FeatureFlag::SshRemoteServer.is_enabled()
+        {
             views.push(ToolPanelView::ServerFileBrowser);
         }
         // openWarp 独有:Skill 管理器,无 feature flag,local_fs 构建下默认显示。
