@@ -7,6 +7,7 @@ pub(crate) mod launch_modal;
 pub(crate) mod left_panel;
 pub(crate) mod onboarding;
 pub(crate) mod right_panel;
+pub(crate) mod server_file_browser;
 mod startup_directory;
 #[cfg(test)]
 #[path = "view_test.rs"]
@@ -347,6 +348,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use warp_core::context_flag::ContextFlag;
+use warp_core::HostId;
 use warp_core::semantic_selection::SemanticSelection;
 use warp_util::path::{user_friendly_path, LineAndColumnArg};
 use warpui::fonts::Weight;
@@ -3510,6 +3512,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::ZapDrive => ToolPanelView::ZapDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
                 LeftPanelDisplayedTab::SshManager => ToolPanelView::SshManager,
+                LeftPanelDisplayedTab::ServerFileBrowser => ToolPanelView::ServerFileBrowser,
                 LeftPanelDisplayedTab::SkillManager => ToolPanelView::SkillManager,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
@@ -5195,6 +5198,21 @@ impl Workspace {
             LeftPanelEvent::ZapDrive(drive_event) => {
                 self.handle_warp_drive_event(drive_event, ctx);
             }
+            LeftPanelEvent::ServerFileBrowser(event) => match event {
+                crate::workspace::view::server_file_browser::ServerFileBrowserEvent::OpenRemoteFile {
+                    remote_path,
+                } => {
+                    #[cfg(feature = "local_tty")]
+                    self.open_remote_file(remote_path.clone(), ctx);
+                    #[cfg(not(feature = "local_tty"))]
+                    let _ = remote_path;
+                }
+                crate::workspace::view::server_file_browser::ServerFileBrowserEvent::CdToDirectory {
+                    path,
+                } => {
+                    self.cd_to_remote_directory(path, ctx);
+                }
+            },
             LeftPanelEvent::OpenFileWithTarget {
                 path,
                 target,
@@ -5398,6 +5416,35 @@ impl Workspace {
             secret,
             ctx,
         );
+
+        // 启动命令注入器 — 等待 shell ready 后自动执行 startup_command
+        if let Some(ref startup_cmd) = server.startup_command {
+            if !startup_cmd.is_empty() {
+                crate::ssh_manager::startup_command_injector::spawn_startup_command_injector(
+                    terminal_view.read(ctx, |v, c| v.inactive_pty_reads_rx(c)),
+                    terminal_view.downgrade(),
+                    startup_cmd.clone(),
+                    ctx,
+                );
+            }
+        }
+
+        // su 密码注入器 — 监听 su 密码提示,自动输入 root 密码
+        let root_secret = match KeychainSecretStore.get(&node_id, SecretKind::RootPassword) {
+            Ok(opt) => opt,
+            Err(e) => {
+                log::debug!("ssh root password keychain read failed: {e}");
+                None
+            }
+        };
+        if let Some(root_pw) = root_secret {
+            crate::ssh_manager::su_password_injector::spawn_su_password_injector(
+                terminal_view.read(ctx, |v, c| v.inactive_pty_reads_rx(c)),
+                terminal_view.downgrade(),
+                root_pw,
+                ctx,
+            );
+        }
 
         // 3. 排队 ssh 命令,等 bootstrap 完成自动 flush。
         terminal_view.update(ctx, |view, ctx| {
@@ -6855,6 +6902,21 @@ impl Workspace {
         let cd_command = format!("cd {}", shell_words::quote(path_str));
         input_handle.update(ctx, |input_view, ctx| {
             input_view.replace_buffer_content(&cd_command, ctx);
+        });
+    }
+
+    // 远端文件浏览器的 cd:与本地 cd_to_directory 不同,这里直接执行命令而不是
+    // 填入输入框。原因是远端会话切换工作目录后需要立即反馈到会话状态,且面板
+    // 是右键菜单触发的明确意图,不需要再让用户二次确认。
+    fn cd_to_remote_directory(&mut self, path: &str, ctx: &mut ViewContext<Self>) {
+        let Some(input_handle) = self.get_active_input_view_handle(ctx) else {
+            log::warn!("No active input view when trying to cd to remote directory");
+            return;
+        };
+
+        let cd_command = format!("cd -- {}", shell_words::quote(path));
+        input_handle.update(ctx, |input_view, ctx| {
+            input_view.try_execute_command(&cd_command, ctx);
         });
     }
 
@@ -12580,6 +12642,13 @@ impl Workspace {
                 if let Ok(std_path) = StandardizedPath::try_new(indexed_path) {
                     let remote_id = RemoteRepositoryIdentifier::new(host_id.clone(), std_path);
                     let pane_group_id = pane_group.id();
+                    self.left_panel_view.update(ctx, |left_panel, ctx| {
+                        left_panel.navigate_server_file_browser(
+                            host_id.clone(),
+                            indexed_path.to_string(),
+                            ctx,
+                        );
+                    });
                     if let Some(file_tree_view) = self
                         .working_directories_model
                         .as_ref(ctx)
@@ -13436,6 +13505,7 @@ impl Workspace {
 
             let window_id = ctx.window_id();
             let path_if_local_clone = path_if_local.clone();
+            let server_file_browser_session = session.clone();
             ActiveSession::handle(ctx).update(ctx, |active_session, ctx| {
                 active_session.set_session_state(
                     window_id,
@@ -13463,9 +13533,34 @@ impl Workspace {
             // directory so it can start indexing and push repo metadata back.
             #[cfg(feature = "local_fs")]
             if has_remote_server {
-                if let (Some(sid), Some(cwd)) = (session_id, pwd) {
+                if let (Some(sid), Some(cwd)) = (session_id, pwd.clone()) {
                     RemoteServerManager::handle(ctx).update(ctx, |mgr, ctx| {
-                        mgr.navigate_to_directory(sid, cwd, ctx);
+                        mgr.navigate_to_directory(sid, cwd.clone(), ctx);
+                    });
+                }
+            }
+
+            // Bind the server file browser to the active remote session.
+            // When the remote server is connected, the client path is fast
+            // and feature-complete. Otherwise fall back to
+            // `Session::execute_command` for basic directory browsing.
+            #[cfg(feature = "local_fs")]
+            if let (Some(sid), Some(cwd), Some(s)) =
+                (session_id, pwd.clone(), server_file_browser_session)
+            {
+                if is_remote && FeatureFlag::SshRemoteServer.is_enabled() {
+                    let host_id = RemoteServerManager::as_ref(ctx)
+                        .host_id_for_session(sid)
+                        .cloned()
+                        .unwrap_or_else(|| HostId::new(format!("ssh-{sid:?}")));
+                    self.left_panel_view.update(ctx, |left_panel, ctx| {
+                        left_panel.set_server_file_browser_root(
+                            host_id,
+                            cwd,
+                            Some(sid),
+                            Some(s),
+                            ctx,
+                        );
                     });
                 }
             }
@@ -15491,6 +15586,9 @@ impl Workspace {
                         ToolPanelView::SshManager => {
                             crate::t!("workspace-left-panel-ssh-manager")
                         }
+                        ToolPanelView::ServerFileBrowser => {
+                            crate::t!("workspace-left-panel-server-file-browser")
+                        }
                         ToolPanelView::SkillManager => {
                             crate::t!("workspace-left-panel-skill-manager")
                         }
@@ -15556,6 +15654,9 @@ impl Workspace {
                 }
                 ToolPanelView::SshManager => {
                     crate::t!("workspace-left-panel-ssh-manager")
+                }
+                ToolPanelView::ServerFileBrowser => {
+                    crate::t!("workspace-left-panel-server-file-browser")
                 }
                 ToolPanelView::SkillManager => {
                     crate::t!("workspace-left-panel-skill-manager")
@@ -18230,6 +18331,9 @@ impl Workspace {
         }
         // openWarp 独有:SSH 管理器,无 feature flag,默认始终显示。
         views.push(ToolPanelView::SshManager);
+        if FeatureFlag::ServerFileBrowser.is_enabled() && FeatureFlag::SshRemoteServer.is_enabled() {
+            views.push(ToolPanelView::ServerFileBrowser);
+        }
         // openWarp 独有:Skill 管理器,无 feature flag,local_fs 构建下默认显示。
         if cfg!(feature = "local_fs") {
             views.push(ToolPanelView::SkillManager);

@@ -4,7 +4,7 @@
 
 # Zap
 
-[English](./README.md)
+[English](./README.md) · [日本語](./README.ja.md)
 
 <sub><i>目前基于 <a href="https://github.com/warpdotdev/warp">Warp</a>,后续将独立演进。</i></sub>
 
@@ -22,6 +22,12 @@ Zap 是一个开放、本地优先的终端,带一等公民的 AI 与 Agent 体�
 - **渲染优化** —— Markdown 管线优化;CJK 软换行 caret 与加粗子像素修复。
 - **多语言界面** —— 原生英文 / 简体中文 / 日语,社区可扩展。
 - **隐私默认值** —— Cloud Agent / Computer Use / Referral / 遥测默认关闭。
+
+## 从 OpenWarp 或 Warp 迁移过来
+
+如果你在项目改名 Zap 之前就一直在用(那时还叫 **OpenWarp**),
+或者你是从上游 **Warp** 切过来的,参见
+[docs/migrate-from-warp.zh-CN.md](docs/migrate-from-warp.zh-CN.md) 把设置带过来。
 
 ## 后续计划
 

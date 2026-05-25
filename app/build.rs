@@ -364,7 +364,7 @@ fn embed_resource_file(target_dir: &Path) {
     // 直接 `cargo build` 出来的 dev 二进制在任务管理器里会显示成 `Zap(N)`。
     // 上游官方流水线在调用前会显式 `export WARP_APP_NAME=...` 覆盖,不受影响。
     let app_name = env::var("WARP_APP_NAME").unwrap_or_else(|_| "Zap".to_owned());
-    let bin_name = env::var("CARGO_BIN_NAME").unwrap_or("local".to_owned());
+    let bin_name = env::var("CARGO_BIN_NAME").unwrap_or("oss".to_owned());
     // 以 `WARP_APP_PUBLISHER` 覆盖;默认与 installer / AUMID 一致为「Zap」。
     // 保持 installer `MyAppPublisher`、Cargo bundle metadata `copyright`、
     // 进程 AUMID `dev.zap.Zap` 三处全局对齐，避免 Windows Shell
@@ -378,7 +378,16 @@ fn embed_resource_file(target_dir: &Path) {
         .join("no-padding")
         .join("icon.ico");
 
-    fs::copy(icon_path, target_dir.join("icon.ico"))
+    if !icon_path.exists() {
+        println!(
+            "cargo:warning=Icon not found at {} (CARGO_BIN_NAME={bin_name}): \
+             skipping Windows resource embed. \
+             Set CARGO_BIN_NAME or add channels/{bin_name}/icon/no-padding/icon.ico",
+            icon_path.display()
+        );
+        return;
+    }
+    fs::copy(&icon_path, target_dir.join("icon.ico"))
         .unwrap_or_else(|err| panic!("Could not copy icon: {err:#}"));
 
     let resource_file_path = target_dir.join("resource.rc");

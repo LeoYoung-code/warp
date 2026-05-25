@@ -4,7 +4,7 @@
 
 # Zap
 
-[简体中文](./README.zh-CN.md)
+[简体中文](./README.zh-CN.md) · [日本語](./README.ja.md)
 
 <sub><i>Currently based on <a href="https://github.com/warpdotdev/warp">Warp</a>; evolving independently going forward.</i></sub>
 
@@ -22,6 +22,13 @@ Zap is an open, local-first terminal with first-class AI and agent support. Plug
 - **Rendering fixes** — tuned Markdown pipeline; CJK soft-wrap caret and bold subpixel fixes.
 - **Localized UI** — English / Simplified Chinese / Japanese out of the box, community-extensible.
 - **Privacy defaults** — Cloud Agent / Computer Use / Referral / telemetry off by default.
+
+## Migrating from OpenWarp or Warp
+
+If you used the project before it was renamed to Zap (formerly **OpenWarp**),
+or are coming from upstream **Warp**, see
+[docs/migrate-from-warp.md](docs/migrate-from-warp.md) to bring your settings
+across.
 
 ## Roadmap
 

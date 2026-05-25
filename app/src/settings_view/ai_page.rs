@@ -137,9 +137,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-const CONTENT_FONT_SIZE: f32 = 12.;
-const PRIMARY_HEADER_FONT_SIZE: f32 = 24.;
-
 const AI_SETTINGS_DROPDOWN_WIDTH: f32 = 250.;
 const AI_SETTINGS_DROPDOWN_MAX_HEIGHT: f32 = 250.;
 // AI 设置页描述文本走 i18n,key 见 app/i18n/{en,zh-CN}/warp.ftl 的 settings-ai-* 段。
@@ -3361,11 +3358,9 @@ impl TypedActionView for AISettingsPageView {
                     let client = http_client::Client::new();
                     ctx.spawn(
                         async move { models_dev::fetch_and_cache(client).await },
-                        |view, result, ctx| {
-                            if let Err(e) = result {
-                                log::warn!("[models.dev] 拉取失败: {e}");
-                            }
-                            view.rebuild_current_page(ctx);
+                        |view, result, ctx| match result {
+                            Ok(()) => view.rebuild_current_page(ctx),
+                            Err(e) => log::warn!("[models.dev] 拉取失败: {e}"),
                         },
                     );
                 } else {
@@ -3377,11 +3372,9 @@ impl TypedActionView for AISettingsPageView {
                 let client = http_client::Client::new();
                 ctx.spawn(
                     async move { models_dev::fetch_and_cache(client).await },
-                    |view, result, ctx| {
-                        if let Err(e) = result {
-                            log::warn!("[models.dev] 刷新失败: {e}");
-                        }
-                        view.rebuild_current_page(ctx);
+                    |view, result, ctx| match result {
+                        Ok(()) => view.rebuild_current_page(ctx),
+                        Err(e) => log::warn!("[models.dev] 刷新失败: {e}"),
                     },
                 );
             }
@@ -3719,7 +3712,7 @@ fn render_toolbar_layout_editor(
             .ui_builder()
             .span(crate::t!("settings-ai-toolbar-layout"))
             .with_style(UiComponentStyles {
-                font_size: Some(CONTENT_FONT_SIZE),
+                font_size: Some(appearance.ui_font_body()),
                 ..Default::default()
             })
             .build()
@@ -3814,7 +3807,7 @@ impl SettingsWidget for WarpAgentHeaderWidget {
                 Text::new_inline(
                     crate::t!("settings-ai-warp-agent-header"),
                     appearance.ui_font_family(),
-                    PRIMARY_HEADER_FONT_SIZE,
+                    appearance.ui_font_display(),
                 )
                 .with_style(Properties::default().weight(Weight::Bold))
                 .with_color(appearance.theme().active_ui_text_color().into())
@@ -3878,7 +3871,7 @@ impl UsageWidget {
                             ))
                         }
                     },
-                    font_size: Some(16.),
+                    font_size: Some(appearance.ui_font_heading_3()),
                     margin: Some(Coords {
                         top: 0.,
                         bottom: 0.,
@@ -4519,7 +4512,7 @@ impl AgentsWidget {
             .ui_builder()
             .span(format!("{min}"))
             .with_style(UiComponentStyles {
-                font_size: Some(CONTENT_FONT_SIZE),
+                font_size: Some(appearance.ui_font_body()),
                 ..Default::default()
             })
             .build()
@@ -4529,7 +4522,7 @@ impl AgentsWidget {
             .ui_builder()
             .span(format!("{max}"))
             .with_style(UiComponentStyles {
-                font_size: Some(CONTENT_FONT_SIZE),
+                font_size: Some(appearance.ui_font_body()),
                 ..Default::default()
             })
             .build()
@@ -4569,10 +4562,10 @@ impl AgentsWidget {
                 .with_style(UiComponentStyles {
                     width: Some(CONTEXT_WINDOW_INPUT_BOX_WIDTH),
                     padding: Some(Coords {
-                        top: 6.,
-                        bottom: 6.,
-                        left: 10.,
-                        right: 10.,
+                        top: appearance.ui_font_size() / 2.,
+                        bottom: appearance.ui_font_size() / 2.,
+                        left: appearance.ui_font_size() * 5. / 6.,
+                        right: appearance.ui_font_size() * 5. / 6.,
                     }),
                     margin: Some(Coords::default().left(12.)),
                     background: Some(appearance.theme().surface_2().into()),
@@ -4952,7 +4945,7 @@ impl AgentsWidget {
                                 font_color: Some(
                                     theme.sub_text_color(theme.surface_2()).into_solid(),
                                 ),
-                                font_size: Some(12.0),
+                                font_size: Some(appearance.ui_font_body()),
                                 ..Default::default()
                             })
                             .build()
@@ -5033,7 +5026,7 @@ impl AgentsWidget {
             Container::new(
                 FormattedTextElement::new(
                     FormattedText::new([FormattedTextLine::Line(subtext_fragments)]),
-                    CONTENT_FONT_SIZE,
+                    appearance.ui_font_body(),
                     appearance.ui_font_family(),
                     appearance.ui_font_family(),
                     styles::description_font_color(ai_settings.is_any_ai_enabled(app), app).into(),
@@ -5315,10 +5308,10 @@ impl AIInputWidget {
             .with_style(UiComponentStyles {
                 width: Some(280.),
                 padding: Some(Coords {
-                    top: 4.,
-                    bottom: 4.,
-                    left: 6.,
-                    right: 6.,
+                    top: appearance.ui_font_size() / 3.,
+                    bottom: appearance.ui_font_size() / 3.,
+                    left: appearance.ui_font_size() / 2.,
+                    right: appearance.ui_font_size() / 2.,
                 }),
                 ..Default::default()
             })
@@ -5363,7 +5356,7 @@ impl AIInputWidget {
                         FormattedText::new([FormattedTextLine::Line(
                             (*AUTODETECTION_DESCRIPTION_FRAGMENTS).clone(),
                         )]),
-                        CONTENT_FONT_SIZE,
+                        appearance.ui_font_body(),
                         appearance.ui_font_family(),
                         appearance.ui_font_family(),
                         styles::description_font_color(is_toggleable, app).into(),
@@ -5413,7 +5406,7 @@ impl AIInputWidget {
                         FormattedText::new([FormattedTextLine::Line(
                             (*NATURAL_LANGUAGE_DETECTION_DESCRIPTION_FRAGMENTS).clone(),
                         )]),
-                        CONTENT_FONT_SIZE,
+                        appearance.ui_font_body(),
                         appearance.ui_font_family(),
                         appearance.ui_font_family(),
                         styles::description_font_color(is_toggleable, app).into(),
@@ -5509,7 +5502,7 @@ impl SettingsWidget for MCPServersWidget {
         let description = Container::new(
             FormattedTextElement::new(
                 FormattedText::new([FormattedTextLine::Line(mcp_description)]),
-                CONTENT_FONT_SIZE,
+                appearance.ui_font_body(),
                 appearance.ui_font_family(),
                 appearance.ui_font_family(),
                 styles::description_font_color(is_any_ai_enabled, app).into(),
@@ -5557,7 +5550,7 @@ impl SettingsWidget for MCPServersWidget {
                                 FormattedText::new([FormattedTextLine::Line(
                                     (*FILE_BASED_MCP_DESCRIPTION_FRAGMENTS).clone(),
                                 )]),
-                                CONTENT_FONT_SIZE,
+                                appearance.ui_font_body(),
                                 appearance.ui_font_family(),
                                 appearance.ui_font_family(),
                                 styles::description_font_color(is_any_ai_enabled, app).into(),
@@ -5636,7 +5629,7 @@ impl AIFactWidget {
         let description = Container::new(
             FormattedTextElement::new(
                 FormattedText::new([FormattedTextLine::Line(rules_description)]),
-                CONTENT_FONT_SIZE,
+                appearance.ui_font_body(),
                 appearance.ui_font_family(),
                 appearance.ui_font_family(),
                 styles::description_font_color(ai_settings.is_any_ai_enabled(app), app).into(),
@@ -6147,7 +6140,7 @@ impl SettingsWidget for CLIAgentWidget {
                         .ui_builder()
                         .span(crate::t!("settings-ai-toolbar-commands-label"))
                         .with_style(UiComponentStyles {
-                            font_size: Some(CONTENT_FONT_SIZE),
+                            font_size: Some(appearance.ui_font_body()),
                             ..Default::default()
                         })
                         .build()
@@ -6514,11 +6507,12 @@ impl AwsBedrockWidget {
             is_enabled: bool,
             app: &AppContext,
         ) -> Box<dyn Element> {
+            let ui_font_size = appearance.ui_font_size();
             let padding = Some(Coords {
-                top: 10.,
-                bottom: 10.,
-                left: 16.,
-                right: 16.,
+                top: ui_font_size * 5. / 6.,
+                bottom: ui_font_size * 5. / 6.,
+                left: ui_font_size * 4. / 3.,
+                right: ui_font_size * 4. / 3.,
             });
             let editor_style = UiComponentStyles {
                 padding,
@@ -6526,7 +6520,7 @@ impl AwsBedrockWidget {
                 ..Default::default()
             };
 
-            let label = Text::new_inline(label, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+            let label = Text::new_inline(label, appearance.ui_font_family(), appearance.ui_font_body())
                 .with_color(styles::header_font_color(is_enabled, app).into())
                 .finish();
 
@@ -6571,13 +6565,13 @@ impl AwsBedrockWidget {
                 .with_cross_axis_alignment(CrossAxisAlignment::Start)
                 .with_spacing(4.)
                 .with_child(
-                    Text::new_inline(title_text, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                    Text::new_inline(title_text, appearance.ui_font_family(), appearance.ui_font_body())
                         .with_style(Properties::default().weight(Weight::Semibold))
                         .with_color(title_color.into())
                         .finish(),
                 )
                 .with_child(
-                    Text::new(detail_text, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                    Text::new(detail_text, appearance.ui_font_family(), appearance.ui_font_body())
                         .with_color(detail_color.into())
                         .soft_wrap(true)
                         .finish(),
