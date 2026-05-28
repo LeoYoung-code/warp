@@ -9,6 +9,7 @@ use super::{
     about_page::AboutPageView,
     ai_page::{AISettingsPageAction, AISettingsPageView},
     appearance_page::AppearanceSettingsPageView,
+    cloud_sync_page::CloudSyncPageView,
     code_page::CodeSettingsPageView,
     features_page::FeaturesPageView,
     keybindings::KeybindingsView,
@@ -110,6 +111,8 @@ pub enum SettingsPageViewHandle {
     ZapDrive(ViewHandle<WarpDriveSettingsPageView>),
     /// 全局 HTTP 代理设置页。
     Network(ViewHandle<NetworkPageView>),
+    /// 云同步设置页。
+    CloudSync(ViewHandle<CloudSyncPageView>),
 }
 
 impl SettingsPageViewHandle {
@@ -129,6 +132,7 @@ impl SettingsPageViewHandle {
             MCPServers(view_handle) => ChildView::new(view_handle).finish(),
             ZapDrive(view_handle) => ChildView::new(view_handle).finish(),
             Network(view_handle) => ChildView::new(view_handle).finish(),
+            CloudSync(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
 }
@@ -136,6 +140,12 @@ impl SettingsPageViewHandle {
 impl From<ViewHandle<MCPServersSettingsPageView>> for SettingsPageViewHandle {
     fn from(view_handle: ViewHandle<MCPServersSettingsPageView>) -> Self {
         SettingsPageViewHandle::MCPServers(view_handle)
+    }
+}
+
+impl From<ViewHandle<CloudSyncPageView>> for SettingsPageViewHandle {
+    fn from(view_handle: ViewHandle<CloudSyncPageView>) -> Self {
+        SettingsPageViewHandle::CloudSync(view_handle)
     }
 }
 
