@@ -45,7 +45,10 @@ pub struct ConnectionTestResult {
     pub error_message: Option<String>,
 }
 
-pub async fn test_connection(server: &SshServerInfo, password: Option<String>) -> ConnectionTestResult {
+pub async fn test_connection(
+    server: &SshServerInfo,
+    password: Option<String>,
+) -> ConnectionTestResult {
     let start = instant::Instant::now();
 
     let result = match server.auth_type {
@@ -95,7 +98,10 @@ async fn test_key_auth(server: &SshServerInfo) -> Result<(), String> {
     }
 }
 
-async fn test_password_auth(server: &SshServerInfo, password: Option<String>) -> Result<(), String> {
+async fn test_password_auth(
+    server: &SshServerInfo,
+    password: Option<String>,
+) -> Result<(), String> {
     let password = password.ok_or("Password not provided")?;
 
     let args = build_ssh_args(server);
@@ -235,7 +241,12 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(test_connection(&s, None));
         assert_eq!(result.status, ConnectionStatus::Offline);
-        assert!(result.error_message.unwrap().contains("Password not provided"));
+        assert!(
+            result
+                .error_message
+                .unwrap()
+                .contains("Password not provided")
+        );
     }
 
     #[test]
@@ -254,7 +265,11 @@ mod tests {
     fn test_password_auth_args_include_sshpass() {
         let s = server();
         let args = build_ssh_args(&s);
-        let mut cmd_args = vec!["sshpass".to_string(), "-p".to_string(), "test_password".to_string()];
+        let mut cmd_args = vec![
+            "sshpass".to_string(),
+            "-p".to_string(),
+            "test_password".to_string(),
+        ];
         cmd_args.extend(args);
         assert!(cmd_args[0] == "sshpass");
         assert!(cmd_args[2] == "test_password");

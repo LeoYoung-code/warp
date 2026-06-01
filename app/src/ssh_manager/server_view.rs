@@ -511,13 +511,21 @@ impl SshServerView {
             port,
             username: user.trim().to_string(),
             auth_type: self.auth_type,
-            key_path: if key_path.is_empty() { None } else { Some(key_path) },
+            key_path: if key_path.is_empty() {
+                None
+            } else {
+                Some(key_path)
+            },
             startup_command: None,
             notes: None,
             last_connected_at: None,
         };
 
-        let password = if password.is_empty() { None } else { Some(password) };
+        let password = if password.is_empty() {
+            None
+        } else {
+            Some(password)
+        };
 
         self.is_testing = true;
         self.status = None;
@@ -526,7 +534,8 @@ impl SshServerView {
         let node_id = self.node_id.clone();
         ctx.spawn(
             async move {
-                let result = warp_ssh_manager::ssh_command::test_connection(&server, password).await;
+                let result =
+                    warp_ssh_manager::ssh_command::test_connection(&server, password).await;
                 (node_id, result)
             },
             |me, (_node_id, result), ctx| {
@@ -535,7 +544,8 @@ impl SshServerView {
                 me.latency_ms = result.latency_ms;
                 match result.status {
                     ConnectionStatus::Online => {
-                        let latency_str = result.latency_ms
+                        let latency_str = result
+                            .latency_ms
                             .map(|ms| format!("{ms}ms"))
                             .unwrap_or_else(|| "N/A".into());
                         let msg = result.error_message.unwrap_or_default();
@@ -551,7 +561,9 @@ impl SshServerView {
                     }
                     ConnectionStatus::Offline => {
                         me.latency_ms = None;
-                        let err = result.error_message.unwrap_or_else(|| "Unknown error".into());
+                        let err = result
+                            .error_message
+                            .unwrap_or_else(|| "Unknown error".into());
                         me.status = Some(StatusBanner::Error(err));
                     }
                     ConnectionStatus::Unknown => {
@@ -868,13 +880,17 @@ impl SshServerView {
         let bg = theme.background();
         let (icon, color, text) = match self.connection_status {
             ConnectionStatus::Online => {
-                let latency_str = self.latency_ms
+                let latency_str = self
+                    .latency_ms
                     .map(|ms| format!(" ({ms}ms)"))
                     .unwrap_or_default();
                 (
                     "●",
                     theme.ui_green_color().into(),
-                    format!("{}{latency_str}", crate::t!("workspace-left-panel-ssh-manager-status-online")),
+                    format!(
+                        "{}{latency_str}",
+                        crate::t!("workspace-left-panel-ssh-manager-status-online")
+                    ),
                 )
             }
             ConnectionStatus::Offline => (
@@ -1052,7 +1068,11 @@ impl View for SshServerView {
         let mut col = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         col.add_child(Container::new(header).with_margin_bottom(8.0).finish());
 
-        col.add_child(Container::new(self.render_connection_status(appearance)).with_margin_bottom(8.0).finish());
+        col.add_child(
+            Container::new(self.render_connection_status(appearance))
+                .with_margin_bottom(8.0)
+                .finish(),
+        );
 
         if let Some(banner) = self.render_status_banner(appearance) {
             col.add_child(banner);

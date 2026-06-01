@@ -30,8 +30,8 @@ use warpui::{
 };
 
 use warp_ssh_manager::{
-    AuthType, KeychainSecretStore, NodeKind, SecretKind, SshNode, SshRepository,
-    SshSecretStore, SshServerInfo,
+    AuthType, KeychainSecretStore, NodeKind, SecretKind, SshNode, SshRepository, SshSecretStore,
+    SshServerInfo,
 };
 
 use crate::editor::{
@@ -433,7 +433,11 @@ impl SshManagerPanel {
 
             let parent = source_node.parent_id;
             let cloned_info = SshServerInfo::clone_from_template(&source_info, String::new());
-            let name = unique_name(c, parent.as_deref(), &format!("{} (copy)", source_node.name))?;
+            let name = unique_name(
+                c,
+                parent.as_deref(),
+                &format!("{} (copy)", source_node.name),
+            )?;
 
             let new_node = SshRepository::create_server(c, parent.as_deref(), &name, &cloned_info)?;
 
