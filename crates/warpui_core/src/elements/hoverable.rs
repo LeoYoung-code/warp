@@ -360,15 +360,12 @@ impl Hoverable {
     /// outside the element for purposes of [`MouseState`].
     fn is_mouse_over_element(&self, ctx: &EventContext, position: Vector2F) -> bool {
         let Some(origin) = self.origin else {
-            log::warn!("self.origin was None in `Hoverable::is_mouse_over_element`");
             return false;
         };
         let Some(size) = self.size() else {
-            log::warn!("self.size() was None in `Hoverable::is_mouse_over_element`");
             return false;
         };
         let Some(z_index) = self.child_max_z_index else {
-            log::warn!("self.child_max_z_index was None in `Hoverable::is_mouse_over_element`");
             return false;
         };
 

@@ -22,6 +22,7 @@ use crate::tab::{NewSessionMenuItem, SelectedTabColor};
 use crate::tab_configs::TabConfig;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
+use crate::terminal::CLIAgent;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
@@ -157,6 +158,8 @@ pub enum WorkspaceAction {
     AddGetStartedTab,
     /// Add a new tab that immediately enters agent view with a new conversation.
     AddAgentTab,
+    /// Add a new terminal tab and launch a specific CLI agent.
+    AddSpecificAgentTab(CLIAgent),
     /// Add a new tab running a local Docker sandbox via `sbx`.
     AddDockerSandboxTab,
     OpenNewSessionMenu {
@@ -677,6 +680,7 @@ impl WorkspaceAction {
             | AddTabWithShell { .. }
             | AddGetStartedTab
             | AddAgentTab
+            | AddSpecificAgentTab(_)
             | AddDockerSandboxTab
             | AddWindow
             | AddWindowWithShell { .. }

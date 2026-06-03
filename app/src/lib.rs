@@ -73,6 +73,7 @@ mod search_bar;
 mod server;
 mod server_time;
 mod session_management;
+mod sftp_manager;
 mod shell_indicator;
 mod skill_manager;
 mod ssh_manager;
@@ -1492,6 +1493,9 @@ fn initialize_app(
     }
 
     timer.mark_interval_end("SUBSYSTEM_INITS_DONE");
+
+    // 后台检测系统安装的 CLI agent，不阻塞 UI
+    crate::terminal::CLIAgent::refresh_install_cache();
 
     let display_count = ctx.windows().display_count();
     ctx.add_singleton_model(|_| DisplayCount(display_count));
