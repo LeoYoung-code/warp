@@ -899,9 +899,7 @@ mod tests {
         let pos_thinking = out
             .find("# Thinking language")
             .expect("应包含 thinking_language");
-        let pos_tools = out
-            .find("# Available Tools")
-            .expect("应包含 tool_aliases");
+        let pos_tools = out.find("# Available Tools").expect("应包含 tool_aliases");
         assert!(
             pos_thinking < pos_tools,
             "thinking_language 应在 tool_aliases 之前: thinking={pos_thinking}, tools={pos_tools}\n{out}"

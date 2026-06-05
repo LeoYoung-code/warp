@@ -699,7 +699,12 @@ impl SshManagerPanel {
         ctx.notify();
     }
 
-    fn enter_rename(&mut self, node_id: String, is_newly_created: bool, ctx: &mut ViewContext<Self>) {
+    fn enter_rename(
+        &mut self,
+        node_id: String,
+        is_newly_created: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let current_name = self
             .nodes
             .iter()
@@ -738,7 +743,11 @@ impl SshManagerPanel {
         });
 
         ctx.focus(&editor);
-        self.rename_state = Some(RenameState { node_id, editor, is_newly_created });
+        self.rename_state = Some(RenameState {
+            node_id,
+            editor,
+            is_newly_created,
+        });
         ctx.notify();
     }
 
@@ -1740,9 +1749,7 @@ impl TypedActionView for SshManagerPanel {
 
     fn handle_action(&mut self, action: &SshManagerPanelAction, ctx: &mut ViewContext<Self>) {
         match action {
-            SshManagerPanelAction::AddRootFolder => {
-                self.on_add_folder_with_parent(None, ctx)
-            }
+            SshManagerPanelAction::AddRootFolder => self.on_add_folder_with_parent(None, ctx),
             SshManagerPanelAction::AddFolder => {
                 let parent = self.parent_for_new_node();
                 self.on_add_folder_with_parent(parent, ctx)
@@ -1861,10 +1868,7 @@ impl View for SshManagerPanel {
 /// - 选中文件夹 → 作为子节点创建在该文件夹下
 /// - 选中服务器 → 作为兄弟节点创建（继承服务器的父级）
 /// - 无选中 → 创建在根级（返回 None）
-fn resolve_parent_for_new_node(
-    selected_id: Option<&str>,
-    nodes: &[SshNode],
-) -> Option<String> {
+fn resolve_parent_for_new_node(selected_id: Option<&str>, nodes: &[SshNode]) -> Option<String> {
     let id = selected_id?;
     let node = nodes.iter().find(|n| n.id == id)?;
     match node.kind {
