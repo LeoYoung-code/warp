@@ -382,6 +382,7 @@ impl SshManagerPanel {
                 .identity_file
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            credential_id: None,
             startup_command: None,
             notes: Some(format!("Imported from {path_display}")),
             last_connected_at: None,
@@ -1878,7 +1879,8 @@ fn resolve_parent_for_new_node(selected_id: Option<&str>, nodes: &[SshNode]) -> 
 }
 
 fn sort_for_display(nodes: Vec<SshNode>, depths: &HashMap<String, usize>) -> Vec<SshNode> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
+    let ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
     let mut by_parent: BTreeMap<Option<String>, Vec<SshNode>> = BTreeMap::new();
     for n in nodes {
         by_parent.entry(n.parent_id.clone()).or_default().push(n);
@@ -1891,15 +1893,36 @@ fn sort_for_display(nodes: Vec<SshNode>, depths: &HashMap<String, usize>) -> Vec
         parent: Option<&String>,
         by_parent: &BTreeMap<Option<String>, Vec<SshNode>>,
         out: &mut Vec<SshNode>,
+        seen: &mut HashSet<String>,
     ) {
         if let Some(children) = by_parent.get(&parent.cloned()) {
             for c in children {
+                if !seen.insert(c.id.clone()) {
+                    continue;
+                }
                 out.push(c.clone());
-                walk(Some(&c.id), by_parent, out);
+                walk(Some(&c.id), by_parent, out, seen);
             }
         }
     }
-    walk(None, &by_parent, &mut out);
+    let root_parents: Vec<Option<String>> = by_parent
+        .keys()
+        .filter(|parent| parent.as_ref().is_none_or(|id| !ids.contains(id)))
+        .cloned()
+        .collect();
+    let mut seen = HashSet::new();
+    for parent in root_parents {
+        walk(parent.as_ref(), &by_parent, &mut out, &mut seen);
+    }
+    for children in by_parent.values() {
+        for child in children {
+            if !seen.insert(child.id.clone()) {
+                continue;
+            }
+            out.push(child.clone());
+            walk(Some(&child.id), &by_parent, &mut out, &mut seen);
+        }
+    }
     out
 }
 
@@ -1910,8 +1933,11 @@ fn compute_depths(nodes: &[SshNode]) -> HashMap<String, usize> {
         let mut d = 0;
         let mut p = n.parent_id.as_deref();
         while let Some(pid) = p {
+            let Some(parent) = by_id.get(pid) else {
+                break;
+            };
             d += 1;
-            p = by_id.get(pid).and_then(|nn| nn.parent_id.as_deref());
+            p = parent.parent_id.as_deref();
             if d > 64 {
                 break;
             }

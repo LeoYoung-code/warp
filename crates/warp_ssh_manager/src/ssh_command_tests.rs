@@ -23,6 +23,7 @@ fn server() -> SshServerInfo {
         username: "alice".into(),
         auth_type: AuthType::Password,
         key_path: None,
+        credential_id: None,
         startup_command: None,
         notes: None,
         last_connected_at: None,
@@ -102,6 +103,33 @@ fn test_connection_requires_password_for_password_auth() {
             .error_message
             .unwrap()
             .contains("Password not provided")
+    );
+}
+
+#[test]
+fn test_connection_requires_password_for_onekey_auth() {
+    let mut s = server();
+    s.auth_type = AuthType::OneKey;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(test_connection(&s, None));
+    assert_eq!(result.status, ConnectionStatus::Offline);
+    assert!(
+        result
+            .error_message
+            .unwrap()
+            .contains("Password not provided")
+    );
+}
+
+#[test]
+fn onekey_key_auth_emits_dash_i_when_key_path_is_resolved() {
+    let mut s = server();
+    s.auth_type = AuthType::OneKey;
+    s.key_path = Some("/home/u/.ssh/shared_ed25519".into());
+
+    assert_eq!(
+        build_ssh_args(&s),
+        vec!["ssh", "-i", "/home/u/.ssh/shared_ed25519", "alice@1.2.3.4"]
     );
 }
 

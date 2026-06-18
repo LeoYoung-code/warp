@@ -166,6 +166,9 @@ pub enum TerminalAction {
         index: usize,
     },
     SuRootFillRootPassword,
+    SuRootFillOneKeyPassword {
+        index: usize,
+    },
     Paste,
     Copy,
     CopyOutputs,
@@ -458,6 +461,9 @@ impl fmt::Debug for TerminalAction {
             CloseContextMenu => f.write_str("CloseContextMenu"),
             OneKeyFillSecret { index } => write!(f, "OneKeyFillSecret {{ index: {index} }}"),
             SuRootFillRootPassword => f.write_str("SuRootFillRootPassword"),
+            SuRootFillOneKeyPassword { index } => {
+                write!(f, "SuRootFillOneKeyPassword {{ index: {index} }}")
+            }
             Paste => f.write_str("Paste"),
             Copy => f.write_str("Copy"),
             CopyOutputs => f.write_str("CopyOutputs"),
