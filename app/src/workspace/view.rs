@@ -885,6 +885,16 @@ pub struct Workspace {
     import_modal: ViewHandle<ImportModal>,
     theme_chooser_view: ViewHandle<ThemeChooser>,
     previous_theme: Option<ThemeKind>,
+    /// The per-window theme override selected for this window via the theme
+    /// chooser's "This window" scope, if any. Source of truth that feeds
+    /// `WindowSnapshot` at save time and is re-applied on restore. `None` when
+    /// the window follows the global theme.
+    theme_override: Option<ThemeKind>,
+    /// The per-window theme override that was active when the theme chooser was
+    /// opened. Lets a cancelled preview (the `revert_theme` path) restore this
+    /// window's override, mirroring how `clear_transient_theme` reverts the
+    /// global preview. `None` means the window had no override at open time.
+    previous_theme_override: Option<ThemeKind>,
     pub(crate) current_workspace_state: WorkspaceState,
     previous_workspace_state: Option<WorkspaceState>,
     welcome_tips_view_state: WelcomeTipsViewState,
@@ -2867,6 +2877,8 @@ impl Workspace {
             ctrl_tab_palette,
             mouse_states: Default::default(),
             previous_theme: None,
+            theme_override: None,
+            previous_theme_override: None,
             settings_pane,
             theme_chooser_view,
             current_workspace_state: Default::default(),
@@ -3285,6 +3297,16 @@ impl Workspace {
             } => {
                 let active_tab_index = window_snapshot.active_tab_index;
                 let restored_left_panel_open = window_snapshot.left_panel_open;
+
+                // Re-apply this window's per-window theme override, if it had one,
+                // and record it so subsequent snapshots keep it.
+                self.theme_override = window_snapshot.theme_override.clone();
+                if let Some(theme_kind) = window_snapshot.theme_override.clone() {
+                    let window_id = ctx.window_id();
+                    AppearanceManager::handle(ctx).update(ctx, |appearance_manager, ctx| {
+                        appearance_manager.set_window_theme(window_id, theme_kind, ctx);
+                    });
+                }
 
                 window_snapshot
                     .tabs
@@ -5195,8 +5217,10 @@ impl Workspace {
                 let open_as_preview = false;
                 self.open_code(code_source, layout, line_col, open_as_preview, &[], ctx);
             }
-            FileTarget::ImageViewer(layout) => {
-                self.open_image(path.clone(), self.get_active_session(ctx), layout, ctx);
+            FileTarget::ImageViewer(_layout) => {
+                // 图片始终在新标签页打开,见 `insert_image_pane`。target 携带的
+                // layout 在此被故意忽略。
+                self.open_image(path.clone(), self.get_active_session(ctx), ctx);
             }
             FileTarget::ExternalEditor(editor) => {
                 crate::util::file::open_file_path_with_editor(
@@ -6987,42 +7011,27 @@ impl Workspace {
         &mut self,
         path: PathBuf,
         session: Option<Arc<Session>>,
-        layout: EditorLayout,
         ctx: &mut ViewContext<Self>,
     ) {
         let pane = ImagePane::new(Some(path), session, ctx);
-        self.insert_image_pane(pane, layout, ctx);
+        self.insert_image_pane(pane, ctx);
     }
 
-    /// Insert an already-constructed [`ImagePane`] using the editor layout (new tab
-    /// vs. split). Shared by local [`Self::open_image`] and remote
-    /// [`Self::open_remote_image`].
-    fn insert_image_pane(
-        &mut self,
-        pane: ImagePane,
-        layout: EditorLayout,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match layout {
-            EditorLayout::NewTab => {
-                let new_tab_placement_setting = TabSettings::as_ref(ctx).new_tab_placement;
-                let new_idx = match new_tab_placement_setting {
-                    NewTabPlacement::AfterAllTabs => self.tab_count(),
-                    NewTabPlacement::AfterCurrentTab => self.active_tab_index + 1,
-                };
-                self.add_tab_from_existing_pane(Box::new(pane), new_idx, ctx);
-            }
-            EditorLayout::SplitPane => {
-                self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
-                    pane_group.add_pane_with_direction(
-                        Direction::Right,
-                        pane,
-                        true, /* focus_new_pane */
-                        ctx,
-                    );
-                });
-            }
-        }
+    /// Insert an already-constructed [`ImagePane`] as its own workspace tab. Shared by
+    /// local [`Self::open_image`] and remote [`Self::open_remote_image`].
+    ///
+    /// Images always open in a new tab rather than honoring `open_file_layout` (which
+    /// defaults to `SplitPane`). Unlike the code editor — whose `CodeView` stacks files
+    /// as internal tabs — an `ImagePane` holds a single image, so a `SplitPane` layout
+    /// would subdivide the window for every image opened. A new tab per image gives the
+    /// expected tab-stacking behavior instead.
+    fn insert_image_pane(&mut self, pane: ImagePane, ctx: &mut ViewContext<Self>) {
+        let new_tab_placement_setting = TabSettings::as_ref(ctx).new_tab_placement;
+        let new_idx = match new_tab_placement_setting {
+            NewTabPlacement::AfterAllTabs => self.tab_count(),
+            NewTabPlacement::AfterCurrentTab => self.active_tab_index + 1,
+        };
+        self.add_tab_from_existing_pane(Box::new(pane), new_idx, ctx);
     }
 
     /// Open a remote image in an image viewer pane. Creates the pane immediately
@@ -7051,10 +7060,9 @@ impl Workspace {
         };
 
         // 先建带 loading spinner 的空 pane,再异步抓字节填充(spinner-first UX)。
-        let layout = *EditorSettings::as_ref(ctx).open_file_layout.value();
         let pane = ImagePane::new_remote(remote_path.clone(), ctx);
         let image_view = pane.image_view(ctx);
-        self.insert_image_pane(pane, layout, ctx);
+        self.insert_image_pane(pane, ctx);
 
         let path_str = remote_path.path.as_str().to_string();
         ctx.spawn(
@@ -9661,6 +9669,7 @@ impl Workspace {
             left_panel_width,
             right_panel_width,
             agent_management_filters: None,
+            theme_override: self.theme_override.clone(),
         }
     }
 
@@ -13479,6 +13488,11 @@ impl Workspace {
             ThemeChooserEvent::OpenThemeDeletionModal(theme_kind) => {
                 self.open_theme_deletion_modal(theme_kind.clone(), ctx);
             }
+            ThemeChooserEvent::WindowThemeOverride(theme_kind) => {
+                // Record (or clear) this window's per-window theme override so it
+                // is persisted in the window snapshot and re-applied on restart.
+                self.theme_override = theme_kind.clone();
+            }
         };
     }
 
@@ -14694,17 +14708,41 @@ impl Workspace {
     }
 
     fn revert_theme(&mut self, ctx: &mut ViewContext<Self>) {
+        // Mirror the transient revert for the per-window override: a "This
+        // window" preview writes directly into the override map (there is no
+        // transient layer for it), so restore this window to whatever override
+        // it had when the chooser opened instead of leaving the preview behind.
+        let window_id = ctx.window_id();
+        let restored = self.previous_theme_override.take();
         AppearanceManager::handle(ctx).update(ctx, |appearance_manager, ctx| {
             appearance_manager.clear_transient_theme(ctx);
+            match &restored {
+                Some(theme_kind) => {
+                    appearance_manager.set_window_theme(window_id, theme_kind.clone(), ctx)
+                }
+                None => appearance_manager.clear_window_theme(window_id, ctx),
+            }
         });
+        self.theme_override = restored;
         self.current_workspace_state.is_theme_chooser_open = false;
         self.previous_theme = None;
         ctx.notify();
     }
 
     fn keep_theme(&mut self, ctx: &mut ViewContext<Self>) {
+        // 关闭时把 per-window override map 同步回已提交的 self.theme_override,抵消打开时
+        // select_theme 在 ThisWindow scope 下写入的预览覆盖(否则重开后 override 会丢失)。
+        let window_id = ctx.window_id();
+        let committed = self.theme_override.clone();
+        AppearanceManager::handle(ctx).update(ctx, |appearance_manager, ctx| match &committed {
+            Some(theme_kind) => {
+                appearance_manager.set_window_theme(window_id, theme_kind.clone(), ctx)
+            }
+            None => appearance_manager.clear_window_theme(window_id, ctx),
+        });
         self.current_workspace_state.is_theme_chooser_open = false;
         self.previous_theme = None;
+        self.previous_theme_override = None;
         ctx.notify();
     }
 
@@ -14898,6 +14936,7 @@ impl Workspace {
         self.current_workspace_state.is_theme_chooser_open = true;
 
         self.previous_theme = Some(current_theme);
+        self.previous_theme_override = self.theme_override.clone();
 
         self.theme_chooser_view.update(ctx, |view, ctx| {
             view.record_open_theme(ctx);
@@ -21705,6 +21744,12 @@ impl View for Workspace {
         }
 
         let window_id = ctx.window_id();
+
+        // Drop any per-window theme override so the override maps don't leak as
+        // windows come and go. No-op if this window had no override.
+        AppearanceManager::handle(ctx).update(ctx, |appearance_manager, ctx| {
+            appearance_manager.clear_window_theme(window_id, ctx);
+        });
 
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.unregister(window_id);
