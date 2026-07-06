@@ -256,7 +256,7 @@ jobs:
         run: |
           set -euo pipefail
           brew tap LeoYoung-code/openwarp "$PWD"
-          brew trust leoyoung-code/openwarp
+          brew trust --tap LeoYoung-code/openwarp
           tap_repo="$(brew --repository leoyoung-code/openwarp)"
           cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
           brew audit --cask --strict openwarp
