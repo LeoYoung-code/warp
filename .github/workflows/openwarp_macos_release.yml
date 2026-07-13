@@ -283,10 +283,15 @@ jobs:
 
           if git diff --quiet -- Casks/zap.rb; then
             echo "Casks/zap.rb already up to date."
+            rm -f Casks/openwarp.rb
+            git add -A Casks
+            git diff --cached --quiet || git commit -m "chore(release): 清理旧的 openwarp cask"
+            git push
             exit 0
           fi
 
-          git add Casks/zap.rb
+          rm -f Casks/openwarp.rb
+          git add -A Casks
           git commit -m "chore(release): 发布 OpenWarp $CASK_VERSION"
           git push
 

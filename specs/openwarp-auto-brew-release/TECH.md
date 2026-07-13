@@ -385,7 +385,7 @@ git push https://github.com/LeoYoung-code/warp.git v2026.05.05.test
 ```bash
 brew tap LeoYoung-code/openwarp
 brew install --cask leoyoung-code/openwarp/zap
-brew list --cask openwarp
+brew list --cask zap
 ```
 
 如果未签名, 需要额外验证首次打开行为, 并在 README 明确说明风险和处理方式。
