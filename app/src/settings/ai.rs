@@ -668,7 +668,7 @@ pub enum AgentProviderApiType {
     OpenAiResp,
     /// Google Gemini 原生协议(generativelanguage.googleapis.com)。
     Gemini,
-    /// Anthropic Messages API 原生协议(api.anthropic.com)。
+    /// Anthropic Messages API 原生协议(`POST /v1/messages`,默认 `api.anthropic.com/v1/`)。
     Anthropic,
     /// Ollama 原生协议(本地或自建 Ollama)。
     Ollama,
@@ -785,7 +785,7 @@ impl AgentProviderApiType {
             Self::OpenAiResp => "https://api.openai.com/v1/",
             Self::Gemini => "https://generativelanguage.googleapis.com/v1beta/",
             Self::Anthropic => "https://api.anthropic.com/v1/",
-            Self::Ollama => "http://localhost:11434/v1/",
+            Self::Ollama => "http://localhost:11434/",
             Self::DeepSeek => "https://api.deepseek.com/v1/",
         }
     }
@@ -814,7 +814,7 @@ pub struct AgentProvider {
     #[serde(default)]
     pub api_type: AgentProviderApiType,
 
-    /// API base URL,例如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`。
+    /// API base URL,例如 `https://api.deepseek.com/v1`、`http://localhost:11434`。
     /// 不要带尾随斜杠,但代码侧会做容错。
     pub base_url: String,
 
