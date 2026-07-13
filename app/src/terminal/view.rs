@@ -5215,12 +5215,7 @@ impl TerminalView {
 
         let should_forward_windows_ctrl_c = is_live;
         ctx.subscribe_to_view(&subagent_view, move |me, view, event, ctx| {
-            me.handle_cli_subagent_view_event(
-                view.id(),
-                event,
-                should_forward_windows_ctrl_c,
-                ctx,
-            );
+            me.handle_cli_subagent_view_event(view.id(), event, should_forward_windows_ctrl_c, ctx);
         });
 
         if is_live {
@@ -5402,18 +5397,17 @@ impl TerminalView {
                 if let Some(conversation_id) = conversation_id {
                     let should_restore = {
                         let model = self.model.lock();
-                        model.block_list().block_with_id(block_id).is_some_and(
-                            |block| {
+                        model
+                            .block_list()
+                            .block_with_id(block_id)
+                            .is_some_and(|block| {
                                 block.agent_interaction_metadata().is_some_and(|metadata| {
                                     metadata.conversation_id() == conversation_id
                                         && metadata.subagent_task_id() == Some(task_id)
                                 })
-                            },
-                        )
+                            })
                     };
-                    if should_restore
-                        && !self.cli_subagent_views.contains_key(block_id)
-                    {
+                    if should_restore && !self.cli_subagent_views.contains_key(block_id) {
                         self.create_cli_subagent_view(
                             block_id.clone(),
                             *conversation_id,
