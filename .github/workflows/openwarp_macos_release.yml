@@ -230,7 +230,7 @@ jobs:
           version = ENV.fetch("CASK_VERSION")
           sha256 = ENV.fetch("CASK_SHA256")
           cask = <<~CASK
-            cask "openwarp" do
+            cask "zap" do
               version "#{version}"
               sha256 "#{sha256}"
 
@@ -247,7 +247,7 @@ jobs:
               ]
             end
           CASK
-          File.write("Casks/openwarp.rb", cask)
+          File.write("Casks/zap.rb", cask)
           RUBY
 
       - name: Audit cask
@@ -258,8 +258,8 @@ jobs:
           brew tap LeoYoung-code/openwarp "$PWD"
           brew trust --tap LeoYoung-code/openwarp
           tap_repo="$(brew --repository leoyoung-code/openwarp)"
-          cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
-          brew audit --cask --strict openwarp
+          cp Casks/zap.rb "$tap_repo/Casks/zap.rb"
+          brew audit --cask --strict zap
 
       - name: Install cask from local file
         shell: bash
@@ -267,9 +267,9 @@ jobs:
         run: |
           set -euo pipefail
           tap_repo="$(brew --repository leoyoung-code/openwarp)"
-          cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
-          brew install --cask openwarp
-          brew list --cask openwarp
+          cp Casks/zap.rb "$tap_repo/Casks/zap.rb"
+          brew install --cask leoyoung-code/openwarp/zap
+          brew list --cask zap
 
       - name: Commit and push cask update
         shell: bash
@@ -281,12 +281,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Casks/openwarp.rb; then
-            echo "Casks/openwarp.rb already up to date."
+          if git diff --quiet -- Casks/zap.rb; then
+            echo "Casks/zap.rb already up to date."
             exit 0
           fi
 
-          git add Casks/openwarp.rb
+          git add Casks/zap.rb
           git commit -m "chore(release): 发布 OpenWarp $CASK_VERSION"
           git push
 

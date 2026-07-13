@@ -9,7 +9,7 @@
 3. 合入成功后打 tag, 触发 GitHub Actions 在 GitHub macOS runner 上编译 mac arm64 安装包。
 4. GitHub Actions 构建成功后创建 GitHub Release, 上传 macOS arm64 DMG。
 5. 计算 DMG 的 `sha256`, 同步到 Homebrew tap/cask 仓库。
-6. 用户可以通过 `brew install --cask openwarp` 安装新版本。
+6. 用户可以通过 `brew install --cask leoyoung-code/openwarp/zap` 安装新版本。
 
 本计划优先实现 macOS arm64。现有 release workflow 已经同时构建 Windows 和 Linux, 但这条自动发布链路应收敛为 macOS arm64 -> GitHub Release -> Homebrew tap, 避免 Windows/Linux 构建失败阻塞 brew 发布。
 
@@ -44,7 +44,7 @@
 - 当前 fork main:`git ls-remote https://github.com/LeoYoung-code/warp.git main`。
 - 构建产物:GitHub Actions macOS runner 生成的 DMG artifact 与 GitHub Release asset。
 - 发布版本:Git tag, 建议 `vYYYY.MM.DD.N`。
-- Homebrew 安装入口:tap 仓库的 `Casks/openwarp.rb`。
+- Homebrew 安装入口:tap 仓库的 `Casks/zap.rb`。
 - 审计记录:Actions run log、Release body、tap commit message。
 
 ## 当前仓库证据
@@ -80,7 +80,7 @@ flowchart TD
   J --> K["GitHub macOS runner 构建 OpenWarp-arm64.dmg"]
   K --> L["创建 GitHub Release"]
   L --> M["下载 Release asset 并计算 sha256"]
-  M --> N["提交 Casks/openwarp.rb 到 tap 仓库"]
+  M --> N["提交 Casks/zap.rb 到 tap 仓库"]
 ```
 
 ## 阶段 1:准备仓库和权限
@@ -107,13 +107,13 @@ gh repo view LeoYoung-code/homebrew-openwarp --json nameWithOwner,defaultBranchR
 
 ```bash
 brew tap LeoYoung-code/openwarp
-brew install --cask openwarp
+brew install --cask leoyoung-code/openwarp/zap
 ```
 
 仓库初始结构:
 
 ```text
-Casks/openwarp.rb
+Casks/zap.rb
 README.md
 ```
 
@@ -302,7 +302,7 @@ script/bundle --channel "$CHANNEL" --arch aarch64 --dmg-name-suffix arm64 --nosi
 
 输入:
 
-- release tag:`needs.prepare_metadata.outputs.release_tag`
+      - release tag:`needs.prepare_metadata.outputs.release_tag`
 - GitHub Release asset URL:`https://github.com/LeoYoung-code/warp/releases/download/<tag>/OpenWarp-arm64.dmg`
 
 步骤:
@@ -310,14 +310,14 @@ script/bundle --channel "$CHANNEL" --arch aarch64 --dmg-name-suffix arm64 --nosi
 1. 在 GitHub Actions runner 上从刚创建的 GitHub Release 下载 `OpenWarp-arm64.dmg` 到临时目录。
 2. 计算 `sha256sum` 或 macOS `shasum -a 256`。
 3. checkout `LeoYoung-code/homebrew-openwarp`。
-4. 更新 `Casks/openwarp.rb`。
-5. 运行 `brew audit --cask --strict Casks/openwarp.rb` 和 `brew install --cask --no-quarantine ./Casks/openwarp.rb`。
+4. 更新 `Casks/zap.rb`。
+5. 运行 `brew audit --cask --strict Casks/zap.rb` 和 `brew install --cask --no-quarantine ./Casks/zap.rb`。
 6. commit + push。
 
-初版 `Casks/openwarp.rb` 可以是:
+初版 `Casks/zap.rb` 可以是:
 
 ```ruby
-cask "openwarp" do
+cask "zap" do
   version "2026.05.05.1"
   sha256 "<sha256>"
 
@@ -327,7 +327,7 @@ cask "openwarp" do
   desc "Open-source build of Warp terminal"
   homepage "https://github.com/LeoYoung-code/warp"
 
-  app "OpenWarp.app"
+  app "Zap.app"
 
   zap trash: [
     "~/Library/Application Support/dev.openwarp.OpenWarp",
@@ -384,7 +384,7 @@ git push https://github.com/LeoYoung-code/warp.git v2026.05.05.test
 
 ```bash
 brew tap LeoYoung-code/openwarp
-brew install --cask openwarp
+brew install --cask leoyoung-code/openwarp/zap
 brew list --cask openwarp
 ```
 
@@ -424,7 +424,7 @@ brew list --cask openwarp
 
 ## 实施顺序
 
-1. 新建 `LeoYoung-code/homebrew-openwarp` tap 仓库, 手工提交初版 `Casks/openwarp.rb`。
+1. 新建 `LeoYoung-code/homebrew-openwarp` tap 仓库, 手工提交初版 `Casks/zap.rb`。
 2. 新增或改造 GitHub macOS-only release workflow, 用测试 tag 验证 GitHub 上能编译出 `OpenWarp-arm64.dmg` 并创建 Release。
 3. 在同一个 GitHub workflow 里增加 `update_homebrew` job, 用测试 Release 验证 cask 更新和本机安装。
 4. 在 Codex 中新建 OpenWarp upstream sync 定时任务, 先只保存为暂停状态或只手动运行 dry-run。

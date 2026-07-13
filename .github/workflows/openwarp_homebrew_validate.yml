@@ -77,7 +77,7 @@ jobs:
           version = ENV.fetch("CASK_VERSION")
           sha256 = ENV.fetch("CASK_SHA256")
           cask = <<~CASK
-            cask "openwarp" do
+            cask "zap" do
               version "#{version}"
               sha256 "#{sha256}"
 
@@ -94,7 +94,7 @@ jobs:
               ]
             end
           CASK
-          File.write("Casks/openwarp.rb", cask)
+          File.write("Casks/zap.rb", cask)
           RUBY
 
       - name: Audit generated cask
@@ -105,8 +105,8 @@ jobs:
           brew tap LeoYoung-code/openwarp "$PWD"
           brew trust --tap LeoYoung-code/openwarp
           tap_repo="$(brew --repository leoyoung-code/openwarp)"
-          cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
-          HOMEBREW_NO_AUTO_UPDATE=1 brew audit --cask --strict openwarp
+          cp Casks/zap.rb "$tap_repo/Casks/zap.rb"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew audit --cask --strict zap
 
       - name: Install generated cask
         shell: bash
@@ -114,9 +114,9 @@ jobs:
         run: |
           set -euo pipefail
           tap_repo="$(brew --repository leoyoung-code/openwarp)"
-          cp Casks/openwarp.rb "$tap_repo/Casks/openwarp.rb"
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask openwarp
-          brew list --cask openwarp
+          cp Casks/zap.rb "$tap_repo/Casks/zap.rb"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask leoyoung-code/openwarp/zap
+          brew list --cask zap
 
       - name: Summary
         shell: bash
