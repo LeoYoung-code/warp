@@ -192,8 +192,9 @@ fn oss_open_installer() -> Result<()> {
     let mut autoupdate_dir = warp_core::paths::cache_dir();
     autoupdate_dir.push("autoupdate");
 
-    let dmg = find_latest_dmg(&autoupdate_dir)
-        .ok_or_else(|| anyhow!("openWarp: 找不到已下载的 dmg(目录: {autoupdate_dir:?})"))?;
+    let dmg = find_latest_dmg(&autoupdate_dir).ok_or_else(|| {
+        anyhow!("openWarp: could not find the downloaded dmg (directory: {autoupdate_dir:?})")
+    })?;
 
     log::info!("openWarp: 准备打开安装 dmg {dmg:?}");
 
